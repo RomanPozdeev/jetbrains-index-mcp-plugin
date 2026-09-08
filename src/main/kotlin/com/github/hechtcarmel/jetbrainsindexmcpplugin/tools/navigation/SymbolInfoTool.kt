@@ -33,6 +33,8 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 class SymbolInfoTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     companion object {
         private const val DEFAULT_MAX_DOC_LENGTH = 4000
         private const val MAX_ALLOWED_DOC_LENGTH = 20000
@@ -51,6 +53,7 @@ class SymbolInfoTool : AbstractMcpTool() {
         Prefer this over ide_find_definition + reading the file when you only need the signature or the docs.
 
         Target (mutually exclusive):
+        - symbolId: opaque handle returned by a previous semantic call
         - file + line + column: position-based lookup, so overloads are addressable
         - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()})
 
@@ -61,6 +64,8 @@ class SymbolInfoTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
+        .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
         .languageAndSymbol(required = false)
@@ -95,7 +100,16 @@ class SymbolInfoTool : AbstractMcpTool() {
             // List<Request> reports Request rather than the type variable E.
             val originalElement = element.takeIf { it !== target }
 
-            createJsonResult(buildResult(project, target, originalElement, includeDoc, maxDocLength))
+            createJsonResult(
+                buildResult(
+                    project,
+                    target,
+                    originalElement,
+                    includeDoc,
+                    maxDocLength,
+                    optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+                )
+            )
         }
     }
 
@@ -104,7 +118,8 @@ class SymbolInfoTool : AbstractMcpTool() {
         target: PsiElement,
         originalElement: PsiElement?,
         includeDoc: Boolean,
-        maxDocLength: Int
+        maxDocLength: Int,
+        preferredSymbolId: String?
     ): SymbolInfoResult {
         val name = (target as? PsiNamedElement)?.name ?: target.text.orEmpty().take(80)
         val resolved = SymbolSignatureResolver.resolve(target, originalElement)
@@ -119,6 +134,7 @@ class SymbolInfoTool : AbstractMcpTool() {
         val position = PsiSourcePosition.position(project, target)
 
         return SymbolInfoResult(
+            symbolId = bindSymbolId(project, target, preferredSymbolId),
             name = name,
             kind = UsageViewUtil.getType(target).takeIf { it.isNotBlank() },
             qualifiedName = qualifiedName(target, name, resolved),

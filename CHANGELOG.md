@@ -4,6 +4,30 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opaque, server-owned `symbolId` handles for semantic navigation and refactoring** — symbol/class search, definition, references, symbol info, implementations, and hierarchy results now expose reusable IDs backed by IntelliJ `SmartPsiElementPointer`s. Symbol-targeting semantic and refactoring tools accept the ID instead of coordinates, preserve or replace it with current `updatedSymbol` metadata after a refactoring, and explicitly invalidate it after safe delete. Handles are scoped to the exact open project and MCP server generation, bounded by a 4,096-entry access-order LRU and a one-hour inactivity TTL; deleted/unrestorable PSI returns `SYMBOL_ID_EXPIRED` without selecting a nearby declaration. The handle is intentionally non-canonical: one PSI declaration may have several unequal, simultaneously valid IDs, while reusing one concrete ID remains stable across line shifts and rename.
+- **Additive structured targets** — target-aware semantic and refactoring tools accept exactly one nested `target` variant: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Runtime validation rejects mixed/ambiguous selectors, the dispatcher routes by nested `target.symbolId`, and all legacy top-level selectors remain supported.
+- **Non-mutating refactoring previews** — `ide_refactor_rename`, `ide_refactor_safe_delete`, and `ide_change_signature` accept `dryRun: true` and return a common contract with applicability, current target metadata, the planned change, estimated affected files, usage/conflict counts, warnings, and elapsed time. Preview performs resolution and conflict discovery without entering the refactoring/source-write phase, saving documents, mutating source, or creating an undo command.
+- **Bounded hierarchy pagination** — type and call hierarchy tools enforce `maxNodes` during deterministic breadth-first traversal and return `returnedNodes`, `truncated`, `elapsedMs`, `hasMore`, and an opaque `cursor`. Continuation frontiers are smart-pointer backed, scoped to the exact session/project, and kept in an independent cache of at most 128 snapshots with a ten-minute inactivity TTL; pages are the progress contract for stateless HTTP. Type hierarchy keeps the legacy `supertypes`/`subtypes` arrays and adds `traversal: [{direction, element}]` so the combined BFS order is observable without breaking existing clients.
+- **Structured file outlines** — `ide_file_structure` preserves the formatted `structure` string and adds `nodes` with name, semantic kind, signature, modifiers, source range, children, and an optional `symbolId` bound to the exact extracted PSI element.
+- **Multi-file `ide_diagnostics`** — a non-empty `files` array (up to 100 supplied paths, with lexical aliases analyzed only once) is available as an alternative to `file`. All requested files share one analysis deadline, problems are aggregated, and `fileAnalyses` reports mode/freshness/timeout/message metadata for every analyzed path; location filters and intentions remain single-file only.
+
+### Changed
+
+- **Bounded cache retention and maintenance** — symbol lookup avoids linear scans and expiry is amortized; symbol/hierarchy caches clean idle state on a schedule and drop closed projects promptly. Hierarchy history shares persistent storage, keeps at most ten snapshots per traversal, reuses retained successor cursors on retries, and enforces global pointer/text budgets with eviction counters. Existing one-hour symbol and ten-minute cursor idle TTLs remain unchanged.
+- **Fresh MCP schemas publish the new contracts** — semantic/refactoring schemas expose `symbolId` and structured `target`, and all three previewable refactorings expose `dryRun`. The protocol contract covers a fresh `initialize` → `tools/list`. The server continues to advertise `tools.listChanged: false`; after a plugin update, reconnect/restart MCP clients such as Codex because their `ALL_TOOLS` registry may be cached for the connection.
+
+### Fixed
+
+- **Exact member identity after full replacement** — replacement content is validated before editing; comments, malformed content, or multiple declarations cannot rebind a method handle to its containing class. Only the verified replacement receives the old handle, which is invalidated if exact restoration fails.
+- **Hierarchy pages preserve valid handles and distinct declarations** — every returned page refreshes root/node handles, anonymous/local declarations no longer collapse by name, and Java/Python scope/generated filters run before result limits.
+- **Large outlines do not evict their own handles** — the complete outline remains available while handle allocation is capped at 500 eligible nodes, with explicit `symbolIdsTruncated`/`symbolIdsOmitted` metadata.
+- **Diagnostics disclose response-cap omissions** — aggregate and per-file `problemsTruncated`, per-file returned counts, and retry guidance distinguish hidden problems from a clean file after the shared 100-problem limit, independently of freshness/timeouts.
+- **Kotlin class metadata is semantic** — interfaces, classes, enum classes, annotation classes, and objects are distinguished from Kotlin PSI flags instead of implementation class names. Qualified names use the shared Kotlin-aware `PsiUtils.qualifiedName` path. Anonymous implementations now receive a readable base-type/location name and keep `qualifiedName: null`.
+- **Targeted sync notices deleted paths** — `ide_sync_files` refreshes the nearest existing parent of a requested path that was deleted outside the IDE and separately reports requested paths, actual refresh roots, and deleted paths. The complete batch is constrained to project/content roots and rejects absolute, traversal, and symlink escapes.
+- **MCP server startup on current 2025.3 IDE builds** — the loopback origin guard no longer links against Ktor's private static `HttpMethod.Get`/`Options` fields, which caused an `IllegalAccessError` and left the tool window at “MCP Server Initializing…” with no HTTP endpoint.
+
 ## [5.9.5] - 2026-09-03
 
 ### Fixed

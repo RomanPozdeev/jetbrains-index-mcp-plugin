@@ -6,7 +6,6 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScop
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScopeResolver
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ImplementationLocation
@@ -15,6 +14,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
+import com.intellij.psi.SmartPointerManager
 import com.intellij.psi.util.PsiModificationTracker
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
@@ -34,6 +34,8 @@ import kotlinx.serialization.json.put
  */
 class FindImplementationsTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     companion object {
         private const val DEFAULT_PAGE_SIZE = 100
         private const val MAX_PAGE_SIZE = PaginationService.MAX_PAGE_SIZE
@@ -51,6 +53,7 @@ class FindImplementationsTool : AbstractMcpTool() {
         Supports pagination: first call returns results + nextCursor. Pass cursor to get the next page.
 
         Target (mutually exclusive):
+        - symbolId: opaque handle returned by a previous semantic call (necessary for fresh search, ignored when cursor is provided)
         - file + line + column: position-based lookup (necessary for fresh search, ignored when cursor is provided)
         - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()}; necessary for fresh search, ignored when cursor is provided)
         - cursor: pagination cursor from a previous response
@@ -65,6 +68,8 @@ class FindImplementationsTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
+        .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
         .languageAndSymbol(required = false)
@@ -133,14 +138,20 @@ class FindImplementationsTool : AbstractMcpTool() {
                     line = impl.line,
                     column = impl.column,
                     kind = impl.kind,
-                    language = impl.language
+                    language = impl.language,
+                    qualifiedName = impl.qualifiedName,
+                    symbolId = null,
+                    pointerTarget = impl.pointerTarget
                 )
             }
 
             val serializedResults = implementationLocations.map { impl ->
                 PaginationService.SerializedResult(
                     key = "${impl.file}:${impl.line}:${impl.column}:${impl.name}",
-                    data = json.encodeToJsonElement(impl)
+                    data = json.encodeToJsonElement(impl),
+                    symbolPointer = impl.pointerTarget?.let {
+                        SmartPointerManager.getInstance(project).createSmartPsiElementPointer(it)
+                    }
                 )
             }
 
@@ -151,7 +162,7 @@ class FindImplementationsTool : AbstractMcpTool() {
                 seenKeys = serializedResults.map { it.key }.toSet(),
                 searchExtender = null,
                 psiModCount = PsiModificationTracker.getInstance(project).modificationCount,
-                projectBasePath = ProjectResolver.normalizePath(project.basePath ?: "")
+                project = project
             )
 
             token to null

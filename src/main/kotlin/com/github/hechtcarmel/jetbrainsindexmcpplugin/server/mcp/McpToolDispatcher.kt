@@ -7,9 +7,12 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandEntry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandHistoryService
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandStatus
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.EdtHeartbeatService
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.McpServerEpoch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.ToolRegistry
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.UnifiedTargetArguments
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.asContextElement
@@ -54,7 +57,9 @@ class McpToolDispatcher @JvmOverloads constructor(
     },
     private val updateHistory: (Project, String, CommandStatus, String?, Long?) -> Unit = { project, id, status, result, duration ->
         CommandHistoryService.getInstance(project).updateCommandStatus(id, status, result, duration)
-    }
+    },
+    private val symbolIdRegistryProvider: () -> SymbolIdRegistry = SymbolIdRegistry::getInstance,
+    private val serverEpochProvider: () -> McpServerEpoch = { McpServerEpoch.shared }
 ) {
 
     private companion object {
@@ -65,6 +70,8 @@ class McpToolDispatcher @JvmOverloads constructor(
          * 100 KB+, and every entry would otherwise sit in the per-project deque.
          */
         const val HISTORY_RESULT_LIMIT = 4096
+        const val SESSION_CHANGED_MESSAGE =
+            "The MCP server session changed while the tool call was running. Rediscover the target and retry."
 
         private fun defaultEdtCheck(): Long? {
             val app = ApplicationManager.getApplication() ?: return null
@@ -82,6 +89,22 @@ class McpToolDispatcher @JvmOverloads constructor(
      * propagates.
      */
     suspend fun call(toolName: String, arguments: JsonObject): CallToolResult {
+        val serverEpoch = serverEpochProvider()
+        val requestEpoch = serverEpoch.capture()
+        return withContext(serverEpoch.requestContext(requestEpoch)) {
+            callInEpoch(toolName, arguments, serverEpoch, requestEpoch)
+        }
+    }
+
+    /** Executes every request phase against the one epoch captured by [call]. */
+    private suspend fun callInEpoch(
+        toolName: String,
+        arguments: JsonObject,
+        serverEpoch: McpServerEpoch,
+        requestEpoch: Long
+    ): CallToolResult {
+        val symbolIdRegistry = symbolIdRegistryProvider()
+
         val tool = toolRegistry.getTool(toolName)
             ?: return CallToolResult.error(ErrorMessages.toolNotFound(toolName))
 
@@ -108,16 +131,45 @@ class McpToolDispatcher @JvmOverloads constructor(
         }
         val projectPath = (projectPathElement as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
-        val projectResult = ProjectResolver.resolveOrOpen(projectPath)
-        if (projectResult.isError) return projectResult.errorResult!!
-        val project = projectResult.project!!
+        // Continuation cursors already identify their cached operation. Target selectors are
+        // search inputs, so they must not influence project routing for the next page.
+        val hasPaginationCursor = hasValidPaginationCursor(arguments)
+        val executionArguments = if (hasPaginationCursor) {
+            UnifiedTargetArguments.withoutTargetSelectors(arguments)
+        } else {
+            arguments
+        }
+        val symbolId = if (hasPaginationCursor) {
+            null
+        } else {
+            UnifiedTargetArguments.symbolIdForRouting(arguments).getOrElse {
+                return CallToolResult.error(it.message ?: "Invalid symbolId target")
+            }
+        }
 
-        val commandEntry = CommandEntry(toolName = toolName, parameters = arguments)
+        val project = if (projectPath == null && symbolId != null) {
+            symbolIdRegistry.projectFor(symbolId).getOrElse {
+                return CallToolResult.error(it.message ?: ErrorMessages.symbolIdExpired(symbolId))
+            }
+        } else {
+            val projectResult = ProjectResolver.resolveOrOpen(projectPath)
+            if (projectResult.isError) return projectResult.errorResult!!
+            projectResult.project!!
+        }
+
+        val commandEntry = CommandEntry(toolName = toolName, parameters = executionArguments)
         recordHistorySafely(project, commandEntry)
 
         val startTime = System.currentTimeMillis()
         return try {
-            val result = withIdeModality { tool.execute(project, arguments) }
+            val result = withIdeModality {
+                tool.execute(project, executionArguments)
+            }
+            // A registry operation completed just before the boundary may have produced a valid
+            // old-epoch handle. Never publish that now-invalid result after restart.
+            if (!serverEpoch.isCurrent(requestEpoch)) {
+                return failed(project, commandEntry, startTime, SESSION_CHANGED_MESSAGE)
+            }
             updateHistorySafely(
                 project = project,
                 commandEntry = commandEntry,
@@ -165,6 +217,12 @@ class McpToolDispatcher @JvmOverloads constructor(
             null -> null
             else -> "[${block::class.simpleName}]"
         }
+
+    private fun hasValidPaginationCursor(arguments: JsonObject): Boolean =
+        (arguments[ParamNames.CURSOR] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.contentOrNull
+            ?.isNotBlank() == true
 
     private suspend fun <T> withIdeModality(block: suspend () -> T): T {
         // Null in plain unit tests that never boot the platform.

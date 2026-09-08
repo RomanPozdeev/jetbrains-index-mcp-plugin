@@ -34,6 +34,8 @@ class SafeDeleteToolBehaviorTest : McpPlatformTestCase() {
 
     private fun decodeRefactoring(text: String): RefactoringResult = json.decodeFromString(text)
 
+    private fun decodePreview(text: String): RefactoringPreviewResult = json.decodeFromString(text)
+
     private fun decodeSymbolBlocked(text: String): SafeDeleteBlockedResult = json.decodeFromString(text)
 
     private fun decodeFileBlocked(text: String): SafeDeleteFileBlockedResult = json.decodeFromString(text)
@@ -234,6 +236,110 @@ class SafeDeleteToolBehaviorTest : McpPlatformTestCase() {
 
         assertFileContains("sd-blocked-src/blocked/PaymentGateway.java", "public String charge()")
         assertFileContains("sd-blocked-src/blocked/CheckoutService.java", "return gateway.charge();")
+    }
+
+    fun testBaseMethodWithOverrideIsBlockedWithoutOrdinaryReferences() = runBlocking {
+        registerSourceRoot("sd-override-src")
+        val basePath = "sd-override-src/overrides/BaseWorker.java"
+        val implementationPath = "sd-override-src/overrides/Worker.java"
+        val baseBefore = """
+            package overrides;
+
+            public abstract class BaseWorker {
+                public abstract void run();
+            }
+        """.trimIndent()
+        val implementationBefore = """
+            package overrides;
+
+            public final class Worker extends BaseWorker {
+                @Override
+                public void run() {}
+            }
+        """.trimIndent()
+        writeProjectFile(basePath, baseBefore)
+        writeProjectFile(implementationPath, implementationBefore)
+
+        val previewResult = SafeDeleteTool().execute(project, buildJsonObject {
+            put("file", basePath)
+            put("line", 4)
+            put("column", 26)
+            put("dryRun", true)
+        })
+
+        assertToolSucceeded("An unsafe preview is a structured result", previewResult)
+        val preview = decodePreview(toolText(previewResult))
+        assertFalse("An overriding implementation must block deleting its base declaration", preview.canApply)
+        assertTrue("The semantic override must count as a usage", preview.usageCount >= 1)
+        assertEquals(preview.usageCount, preview.conflictCount)
+        assertEquals(baseBefore, readProjectFileVfs(basePath))
+        assertEquals(implementationBefore, readProjectFileVfs(implementationPath))
+
+        val applyResult = SafeDeleteTool().execute(project, buildJsonObject {
+            put("file", basePath)
+            put("line", 4)
+            put("column", 26)
+        })
+        assertToolSucceeded("A blocked safe delete is a structured result", applyResult)
+        val blocked = decodeSymbolBlocked(toolText(applyResult))
+        assertFalse(blocked.canDelete)
+        assertTrue(blocked.blockingUsages.any { it.file == implementationPath })
+        assertEquals(baseBefore, readProjectFileVfs(basePath))
+        assertEquals(implementationBefore, readProjectFileVfs(implementationPath))
+    }
+
+    fun testParameterDeleteIsBlockedByCallSiteArgument() = runBlocking {
+        registerSourceRoot("sd-parameter-src")
+        val declarationPath = "sd-parameter-src/parameters/Calculator.java"
+        val callerPath = "sd-parameter-src/parameters/CalculatorUser.java"
+        val declarationBefore = """
+            package parameters;
+
+            public final class Calculator {
+                public int add(int left, int right) {
+                    return left + right;
+                }
+            }
+        """.trimIndent()
+        val callerBefore = """
+            package parameters;
+
+            public final class CalculatorUser {
+                public int total() {
+                    return new Calculator().add(1, 2);
+                }
+            }
+        """.trimIndent()
+        writeProjectFile(declarationPath, declarationBefore)
+        writeProjectFile(callerPath, callerBefore)
+
+        val previewResult = SafeDeleteTool().execute(project, buildJsonObject {
+            put("file", declarationPath)
+            put("line", 4)
+            put("column", 35)
+            put("dryRun", true)
+        })
+
+        assertToolSucceeded("An unsafe parameter preview is a structured result", previewResult)
+        val preview = decodePreview(toolText(previewResult))
+        assertFalse("A call-site argument must block literal parameter deletion", preview.canApply)
+        assertTrue("The call-site argument must count as a usage", preview.usageCount >= 1)
+        assertEquals(declarationBefore, readProjectFileVfs(declarationPath))
+        assertEquals(callerBefore, readProjectFileVfs(callerPath))
+
+        val applyResult = SafeDeleteTool().execute(project, buildJsonObject {
+            put("file", declarationPath)
+            put("line", 4)
+            put("column", 35)
+        })
+        assertToolSucceeded("A blocked parameter delete is a structured result", applyResult)
+        val blocked = decodeSymbolBlocked(toolText(applyResult))
+        assertFalse(blocked.canDelete)
+        assertTrue("Expected the caller among ${blocked.blockingUsages}", blocked.blockingUsages.any {
+            it.file == callerPath
+        })
+        assertEquals(declarationBefore, readProjectFileVfs(declarationPath))
+        assertEquals(callerBefore, readProjectFileVfs(callerPath))
     }
 
     fun testReferencedJavaFileIsRefusedAndTheReferencingFileIsReported() = runBlocking {

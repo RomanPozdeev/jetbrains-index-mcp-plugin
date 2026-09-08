@@ -24,10 +24,15 @@ import com.intellij.psi.PsiManager
 import com.intellij.testFramework.IndexingTestUtil
 import com.intellij.testFramework.PsiTestUtil
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.nio.file.Files
@@ -119,6 +124,8 @@ class GetDiagnosticsToolBehaviorTest : BasePlatformTestCase() {
             val diagnostics = decodeDiagnostics(result)
             assertTrue("Analysis should be marked timed out", diagnostics.analysisTimedOut == true)
             assertFalse("Timed out analysis should not be marked fresh", diagnostics.analysisFresh == true)
+            assertEquals(0, diagnostics.problemCount)
+            assertEquals("A timeout is not output truncation", false, diagnostics.problemsTruncated)
             assertNull("A timed-out analysis produced no result, so analysisMode must be null", diagnostics.analysisMode)
             assertTrue(
                 "Expected timeout explanation",
@@ -603,6 +610,275 @@ class GetDiagnosticsToolBehaviorTest : BasePlatformTestCase() {
         } finally {
             service.closedFileAnalysisOverride = originalRunner
         }
+    }
+
+    fun testMultiFileDiagnosticsAggregateProblemsAndReportPerFileAnalysis() = runBlocking {
+        createProjectFile("MultiA.java", "class MultiA {}")
+        createProjectFile("MultiB.java", "class MultiB {}")
+
+        val service = DiagnosticsAnalysisService.getInstance(project)
+        val originalRunner = service.closedFileAnalysisOverride
+
+        try {
+            service.closedFileAnalysisOverride = { request ->
+                listOf(
+                    CodeSmellInfo(
+                        request.document,
+                        "Synthetic problem in ${request.filePath}",
+                        TextRange(0, 1),
+                        HighlightSeverity.ERROR
+                    )
+                )
+            }
+
+            val result = GetDiagnosticsTool().execute(project, buildJsonObject {
+                put("files", buildJsonArray {
+                    add(JsonPrimitive("src/MultiA.java"))
+                    add(JsonPrimitive("src/MultiB.java"))
+                })
+            })
+
+            assertFalse("Multi-file diagnostics should succeed: ${renderResult(result)}", result.isFailure)
+            val diagnostics = decodeDiagnostics(result)
+            assertEquals(2, diagnostics.problemCount)
+            assertEquals(
+                listOf("src/MultiA.java", "src/MultiB.java"),
+                diagnostics.problems.orEmpty().map { it.file }
+            )
+            assertEquals(
+                listOf("src/MultiA.java", "src/MultiB.java"),
+                diagnostics.fileAnalyses.orEmpty().map { it.file }
+            )
+            diagnostics.fileAnalyses.orEmpty().forEach { analysis ->
+                assertEquals(DiagnosticsAnalysisService.MODE_CLOSED_BATCH, analysis.mode)
+                assertTrue(analysis.fresh)
+                assertFalse(analysis.timedOut)
+            }
+            assertNull("Legacy single-file mode must stay absent for multi-file calls", diagnostics.analysisMode)
+            assertNull("Intentions are position-based and must stay absent for multi-file calls", diagnostics.intentions)
+        } finally {
+            service.closedFileAnalysisOverride = originalRunner
+        }
+    }
+
+    fun testMultiFileDiagnosticsReportHiddenProblemsAfterAggregateLimit() = runBlocking {
+        val diagnostics = diagnoseSyntheticProblems(firstCount = 100, secondCount = 1)
+
+        assertEquals(100, diagnostics.problemCount)
+        assertEquals(true, diagnostics.problemsTruncated)
+        assertTrue(diagnostics.problems.orEmpty().all { it.file == "src/CapA.java" })
+        val analyses = requireNotNull(diagnostics.fileAnalyses)
+        assertEquals(100, analyses[0].problemCount)
+        assertFalse("Exactly 100 problems in A were all returned", analyses[0].problemsTruncated)
+        assertEquals(0, analyses[1].problemCount)
+        assertTrue("B's hidden problem must be explicit", analyses[1].problemsTruncated)
+        assertTrue("Output truncation must not change analysis freshness", analyses[1].fresh)
+        assertFalse(analyses[1].timedOut)
+        assertTrue("Provide an actionable single-file retry", analyses[1].message.orEmpty().contains("using 'file'"))
+    }
+
+    fun testMultiFileDiagnosticsDoNotReportTruncationForCleanFileAfterLimit() = runBlocking {
+        val diagnostics = diagnoseSyntheticProblems(firstCount = 100, secondCount = 0)
+
+        assertEquals(100, diagnostics.problemCount)
+        assertEquals(false, diagnostics.problemsTruncated)
+        val analyses = requireNotNull(diagnostics.fileAnalyses)
+        assertEquals(listOf(100, 0), analyses.map { it.problemCount })
+        assertTrue(analyses.all { it.fresh && !it.timedOut && !it.problemsTruncated })
+    }
+
+    fun testMultiFileDiagnosticsReportPartiallyReturnedFile() = runBlocking {
+        val diagnostics = diagnoseSyntheticProblems(firstCount = 99, secondCount = 2)
+
+        assertEquals(100, diagnostics.problemCount)
+        assertEquals(true, diagnostics.problemsTruncated)
+        val analyses = requireNotNull(diagnostics.fileAnalyses)
+        assertEquals(listOf(99, 1), analyses.map { it.problemCount })
+        assertFalse(analyses[0].problemsTruncated)
+        assertTrue(analyses[1].problemsTruncated)
+        assertEquals("src/CapB.java", diagnostics.problems.orEmpty().last().file)
+    }
+
+    fun testSingleFileDiagnosticsReportProblemLimitTruncation() = runBlocking {
+        val diagnostics = diagnoseSyntheticProblems(firstCount = 101)
+
+        assertEquals(100, diagnostics.problemCount)
+        assertEquals(true, diagnostics.problemsTruncated)
+        assertEquals(true, diagnostics.analysisFresh)
+        assertTrue(diagnostics.analysisMessage.orEmpty().contains("narrower startLine/endLine"))
+        assertNull(diagnostics.fileAnalyses)
+    }
+
+    fun testSingleFileDiagnosticsDoNotReportTruncationAtExactLimit() = runBlocking {
+        val diagnostics = diagnoseSyntheticProblems(firstCount = 100)
+
+        assertEquals(100, diagnostics.problemCount)
+        assertEquals(false, diagnostics.problemsTruncated)
+        assertEquals(true, diagnostics.analysisFresh)
+    }
+
+    private suspend fun diagnoseSyntheticProblems(firstCount: Int, secondCount: Int? = null): DiagnosticsResult {
+        createProjectFile("CapA.java", "class CapA {}")
+        if (secondCount != null) createProjectFile("CapB.java", "class CapB {}")
+        val service = DiagnosticsAnalysisService.getInstance(project)
+        val originalRunner = service.closedFileAnalysisOverride
+        try {
+            service.closedFileAnalysisOverride = { request ->
+                val count = if (request.filePath == "src/CapA.java") firstCount else requireNotNull(secondCount)
+                List(count) { index ->
+                    CodeSmellInfo(request.document, "Synthetic error $index", TextRange(0, 1), HighlightSeverity.ERROR)
+                }
+            }
+            val result = GetDiagnosticsTool().execute(project, buildJsonObject {
+                put("severity", "errors")
+                if (secondCount == null) {
+                    put("file", "src/CapA.java")
+                } else {
+                    put("files", buildJsonArray {
+                        add(JsonPrimitive("src/CapA.java"))
+                        add(JsonPrimitive("src/CapB.java"))
+                    })
+                }
+            })
+            assertFalse("Synthetic diagnostics should succeed: ${renderResult(result)}", result.isFailure)
+            return decodeDiagnostics(result)
+        } finally {
+            service.closedFileAnalysisOverride = originalRunner
+        }
+    }
+
+    fun testMultiFileDiagnosticsUseOneSharedTimeoutBudget() = runBlocking {
+        createProjectFile("BudgetA.java", "class BudgetA {}")
+        createProjectFile("BudgetB.java", "class BudgetB {}")
+
+        val service = DiagnosticsAnalysisService.getInstance(project)
+        val originalTimeout = service.analysisTimeoutMsOverride
+        val originalRunner = service.closedFileAnalysisOverride
+
+        try {
+            // Each file is individually faster than the configured timeout. Only a shared budget
+            // can make the second file time out.
+            service.analysisTimeoutMsOverride = 300L
+            service.closedFileAnalysisOverride = {
+                delay(200L)
+                emptyList()
+            }
+
+            val result = GetDiagnosticsTool().execute(project, buildJsonObject {
+                put("files", buildJsonArray {
+                    add(JsonPrimitive("src/BudgetA.java"))
+                    add(JsonPrimitive("src/BudgetB.java"))
+                })
+            })
+
+            assertFalse("Multi-file diagnostics should return timeout metadata: ${renderResult(result)}", result.isFailure)
+            val analyses = decodeDiagnostics(result).fileAnalyses.orEmpty()
+            assertEquals(2, analyses.size)
+            assertTrue("The first file should finish within the shared budget", analyses[0].fresh)
+            assertFalse(analyses[0].timedOut)
+            assertTrue("The second file must consume only the remaining shared budget", analyses[1].timedOut)
+            assertFalse(analyses[1].fresh)
+            assertEquals(0, analyses[1].problemCount)
+            assertFalse("Timeout metadata is independent of the output cap", analyses[1].problemsTruncated)
+        } finally {
+            service.analysisTimeoutMsOverride = originalTimeout
+            service.closedFileAnalysisOverride = originalRunner
+        }
+    }
+
+    fun testDiagnosticsTimeoutIncludesWaitingForAnalysisLock() = runBlocking {
+        createProjectFile("LockBudget.java", "class LockBudget {}")
+
+        val service = DiagnosticsAnalysisService.getInstance(project)
+        val originalTimeout = service.analysisTimeoutMsOverride
+        val originalRunner = service.closedFileAnalysisOverride
+        val lockAcquired = CompletableDeferred<Unit>()
+        val releaseLock = CompletableDeferred<Unit>()
+        val lockHolder = launch(Dispatchers.Default) {
+            DiagnosticsAnalysisCoordinator.getInstance().withMainPassLock {
+                lockAcquired.complete(Unit)
+                releaseLock.await()
+            }
+        }
+        lockAcquired.await()
+
+        try {
+            service.analysisTimeoutMsOverride = 100L
+            service.closedFileAnalysisOverride = {
+                fail("Analysis must not start while another call owns the main-pass lock")
+                emptyList()
+            }
+
+            val result = GetDiagnosticsTool().execute(project, buildJsonObject {
+                put("file", "src/LockBudget.java")
+            })
+
+            assertFalse("Lock timeout should be returned as metadata: ${renderResult(result)}", result.isFailure)
+            val diagnostics = decodeDiagnostics(result)
+            assertTrue("Waiting for the shared lock must consume the timeout budget", diagnostics.analysisTimedOut == true)
+            assertFalse(diagnostics.analysisFresh == true)
+        } finally {
+            service.analysisTimeoutMsOverride = originalTimeout
+            service.closedFileAnalysisOverride = originalRunner
+            releaseLock.complete(Unit)
+            lockHolder.join()
+        }
+    }
+
+    fun testMultiFileDiagnosticsRejectAmbiguousTargetsAndLocations() = runBlocking {
+        createProjectFile("Validation.java", "class Validation {}")
+
+        val bothTargets = GetDiagnosticsTool().execute(project, buildJsonObject {
+            put("file", "src/Validation.java")
+            put("files", buildJsonArray { add(JsonPrimitive("src/Validation.java")) })
+        })
+        assertTrue("file and files must be mutually exclusive", bothTargets.isFailure)
+        assertTrue(renderResult(bothTargets).contains("mutually exclusive"))
+
+        val multiFileLocation = GetDiagnosticsTool().execute(project, buildJsonObject {
+            put("files", buildJsonArray { add(JsonPrimitive("src/Validation.java")) })
+            put("line", 1)
+        })
+        assertTrue("Location parameters require the singular file target", multiFileLocation.isFailure)
+        assertTrue(renderResult(multiFileLocation).contains("single 'file'"))
+    }
+
+    fun testMultiFileDiagnosticsBoundAndNormalizeRequestedPaths() = runBlocking {
+        val tooMany = GetDiagnosticsTool().execute(project, buildJsonObject {
+            put("files", buildJsonArray {
+                repeat(101) { index -> add(JsonPrimitive("src/File$index.java")) }
+            })
+        })
+        assertTrue("An unbounded diagnostics request must be rejected", tooMany.isFailure)
+        assertTrue(renderResult(tooMany).contains("at most 100"))
+
+        createProjectFile("Normalized.java", "class Normalized {}")
+        val duplicateAliases = GetDiagnosticsTool().execute(project, buildJsonObject {
+            put("files", buildJsonArray {
+                add(JsonPrimitive("src/Normalized.java"))
+                add(JsonPrimitive("  src/./Normalized.java  "))
+                add(JsonPrimitive("src/dir/../Normalized.java"))
+            })
+        })
+        assertFalse("Lexical aliases should be analyzed once: ${renderResult(duplicateAliases)}", duplicateAliases.isFailure)
+        assertEquals(
+            listOf("src/Normalized.java"),
+            decodeDiagnostics(duplicateAliases).fileAnalyses.orEmpty().map { it.file }
+        )
+
+        val traversal = GetDiagnosticsTool().execute(project, buildJsonObject {
+            put("files", buildJsonArray { add(JsonPrimitive("../Normalized.java")) })
+        })
+        assertTrue("Traversal outside the project must be rejected", traversal.isFailure)
+        assertTrue(renderResult(traversal).contains("traversal"))
+
+        val absolute = GetDiagnosticsTool().execute(project, buildJsonObject {
+            put("files", buildJsonArray {
+                add(JsonPrimitive("${requireNotNull(project.basePath)}/src/Normalized.java"))
+            })
+        })
+        assertTrue("Absolute paths must be rejected from the multi-file contract", absolute.isFailure)
+        assertTrue(renderResult(absolute).contains("project-relative"))
     }
 
     fun testFiltersBuildDiagnosticsByRequestedSeverity() = runBlocking {

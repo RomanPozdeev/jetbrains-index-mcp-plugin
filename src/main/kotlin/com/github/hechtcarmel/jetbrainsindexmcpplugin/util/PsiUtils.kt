@@ -8,6 +8,7 @@ import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.toNioPathOrNull
+import com.intellij.psi.PsiAnonymousClass
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
@@ -315,6 +316,14 @@ object PsiUtils {
     fun qualifiedName(element: PsiElement): String? {
         (element as? PsiQualifiedNamedElement)?.qualifiedName?.takeIf { it.isNotBlank() }?.let { return it }
 
+        return reflectiveQualifiedName(element)
+    }
+
+    /**
+     * Reflection-only half of [qualifiedName]. Kept separate so optional-language behavior can
+     * be covered by headless tests without putting the Kotlin or PHP plugin on the test classpath.
+     */
+    internal fun reflectiveQualifiedName(element: Any): String? {
         for (accessor in QUALIFIED_NAME_ACCESSORS) {
             val value = runCatching {
                 element.javaClass.getMethod(accessor).invoke(element)?.toString()
@@ -385,8 +394,79 @@ object PsiUtils {
     private val ktClassOrObjectClass: Class<*>? by lazy {
         runCatching { Class.forName("org.jetbrains.kotlin.psi.KtClassOrObject") }.getOrNull()
     }
+    private val ktClassClass: Class<*>? by lazy {
+        runCatching { Class.forName("org.jetbrains.kotlin.psi.KtClass") }.getOrNull()
+    }
+    private val ktObjectDeclarationClass: Class<*>? by lazy {
+        runCatching { Class.forName("org.jetbrains.kotlin.psi.KtObjectDeclaration") }.getOrNull()
+    }
     private val lightClassUtilsClass: Class<*>? by lazy {
         runCatching { Class.forName("org.jetbrains.kotlin.asJava.LightClassUtilsKt") }.getOrNull()
+    }
+
+    /**
+     * Returns the declaration kind for a physical Kotlin class/object PSI element.
+     *
+     * `KtClass` is the runtime type for classes, interfaces, enum classes, and annotation
+     * classes, so inspecting the implementation class name cannot distinguish them. The Kotlin
+     * PSI's semantic flags are the source of truth. Objects use the sibling
+     * `KtObjectDeclaration` type and are checked first.
+     */
+    internal fun kotlinClassKind(element: PsiElement): String? =
+        reflectiveKotlinClassKind(element, ktClassClass, ktObjectDeclarationClass)
+
+    /** Reflection seam used by headless tests; production passes the optional Kotlin PSI types. */
+    internal fun reflectiveKotlinClassKind(
+        element: Any,
+        ktClassType: Class<*>?,
+        ktObjectDeclarationType: Class<*>?
+    ): String? {
+        if (ktObjectDeclarationType?.isInstance(element) == true) return "OBJECT"
+        if (ktClassType?.isInstance(element) != true) return null
+
+        fun flag(methodName: String): Boolean = runCatching {
+            element.javaClass.getMethod(methodName).invoke(element) == true
+        }.getOrDefault(false)
+
+        return when {
+            flag("isAnnotation") -> "ANNOTATION"
+            flag("isEnum") -> "ENUM"
+            flag("isInterface") -> "INTERFACE"
+            else -> "CLASS"
+        }
+    }
+
+    /**
+     * User-facing simple name for a class-like element. Anonymous Java classes and Kotlin object
+     * expressions have no declaration name, so describe the implemented/base type and exact
+     * source location instead of returning `unknown` or silently dropping the result.
+     */
+    fun classDisplayName(project: Project, element: PsiElement): String? {
+        (element as? PsiNamedElement)?.name?.takeIf { it.isNotBlank() }?.let { return it }
+        runCatching {
+            element.javaClass.getMethod("getName").invoke(element) as? String
+        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { return it }
+
+        val psiClass = resolveAsPsiClass(element) ?: return null
+        psiClass.name?.takeIf { it.isNotBlank() }?.let { return it }
+
+        val anonymousClass = psiClass as? PsiAnonymousClass
+        val baseName = anonymousClass?.baseClassType?.resolve()?.name
+            ?: anonymousClass?.baseClassType?.presentableText
+            ?: psiClass.interfaces.firstOrNull()?.name
+            ?: psiClass.superClass
+                ?.takeUnless { it.qualifiedName == "java.lang.Object" }
+                ?.name
+            ?: "unknown type"
+
+        val sourceElement = resolveNavigationTarget(element)
+        val fileName = sourceElement.containingFile?.name
+            ?: psiClass.containingFile?.name
+            ?: "unknown file"
+        val line = PsiSourcePosition.line(project, sourceElement)
+            ?: PsiSourcePosition.line(project, psiClass)
+
+        return "<anonymous implementation of $baseName at $fileName:${line ?: "?"}>"
     }
 
     /**

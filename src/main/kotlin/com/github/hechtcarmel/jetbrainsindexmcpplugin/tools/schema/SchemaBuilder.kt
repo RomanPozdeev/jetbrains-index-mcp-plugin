@@ -4,6 +4,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.SchemaConstants
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.UnifiedTargetArguments
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.serialization.json.*
 
@@ -65,6 +66,73 @@ class SchemaBuilder private constructor() {
         if (required) {
             requiredFields.add(ParamNames.LANGUAGE)
             requiredFields.add(ParamNames.SYMBOL)
+        }
+    }
+
+    fun symbolId() = apply {
+        properties[ParamNames.SYMBOL_ID] = buildJsonObject {
+            put(SchemaConstants.TYPE, SchemaConstants.TYPE_STRING)
+            put(
+                SchemaConstants.DESCRIPTION,
+                "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. " +
+                    "It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. " +
+                    "The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality."
+            )
+        }
+    }
+
+    /**
+     * Additive nested selector contract. `oneOf` is intentionally expressed in prose and checked
+     * at runtime because some MCP clients reject top-level combinator schemas.
+     */
+    fun target() = apply {
+        properties[UnifiedTargetArguments.TARGET] = buildJsonObject {
+            put(SchemaConstants.TYPE, SchemaConstants.TYPE_OBJECT)
+            put(
+                SchemaConstants.DESCRIPTION,
+                "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. " +
+                    "Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors " +
+                    "and with className where that legacy selector is supported."
+            )
+            putJsonObject(SchemaConstants.PROPERTIES) {
+                putJsonObject(ParamNames.SYMBOL_ID) {
+                    put(SchemaConstants.TYPE, SchemaConstants.TYPE_STRING)
+                    put(
+                        SchemaConstants.DESCRIPTION,
+                        "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality."
+                    )
+                }
+                putJsonObject(UnifiedTargetArguments.POSITION) {
+                    put(SchemaConstants.TYPE, SchemaConstants.TYPE_OBJECT)
+                    putJsonObject(SchemaConstants.PROPERTIES) {
+                        putJsonObject(ParamNames.FILE) {
+                            put(SchemaConstants.TYPE, SchemaConstants.TYPE_STRING)
+                            put(SchemaConstants.DESCRIPTION, SchemaConstants.DESC_FILE)
+                        }
+                        putJsonObject(ParamNames.LINE) {
+                            put(SchemaConstants.TYPE, SchemaConstants.TYPE_INTEGER)
+                            put(SchemaConstants.DESCRIPTION, SchemaConstants.DESC_LINE)
+                        }
+                        putJsonObject(ParamNames.COLUMN) {
+                            put(SchemaConstants.TYPE, SchemaConstants.TYPE_INTEGER)
+                            put(SchemaConstants.DESCRIPTION, SchemaConstants.DESC_COLUMN)
+                        }
+                    }
+                    putJsonArray(SchemaConstants.REQUIRED) {
+                        add(ParamNames.FILE)
+                        add(ParamNames.LINE)
+                        add(ParamNames.COLUMN)
+                    }
+                }
+                putJsonObject(UnifiedTargetArguments.QUALIFIED_NAME) {
+                    put(SchemaConstants.TYPE, SchemaConstants.TYPE_STRING)
+                    put(SchemaConstants.DESCRIPTION, "Language-qualified symbol reference, for example com.example.Foo#bar.")
+                }
+                putJsonObject(ParamNames.LANGUAGE) {
+                    put(SchemaConstants.TYPE, SchemaConstants.TYPE_STRING)
+                    put(SchemaConstants.DESCRIPTION, "Language used to resolve qualifiedName.")
+                }
+            }
         }
     }
 

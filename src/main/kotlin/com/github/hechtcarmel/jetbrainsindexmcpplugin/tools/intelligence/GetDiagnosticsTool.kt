@@ -6,7 +6,9 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.BuildMessage
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.DiagnosticsResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileDiagnosticsAnalysis
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.IntentionInfo
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ProblemInfo
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TestResultInfo
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TestSummary
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
@@ -24,11 +26,19 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.int
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
+import java.nio.file.InvalidPathException
+import java.nio.file.Path
 
 /**
  * MCP tool that analyzes files for code problems and available intentions.
@@ -51,6 +61,8 @@ class GetDiagnosticsTool : AbstractMcpTool() {
     companion object {
         private const val MAX_PROBLEMS = 100
         private const val MAX_INTENTIONS = 50
+        private const val MAX_FILES = 100
+        private val WINDOWS_DRIVE_PATH = Regex("^[A-Za-z]:.*")
     }
 
     override val name = "ide_diagnostics"
@@ -58,20 +70,30 @@ class GetDiagnosticsTool : AbstractMcpTool() {
     override val description = """
         Get code diagnostics from multiple sources: file analysis (errors, warnings, intentions), build output (compiler errors/warnings from last build), and test results (from open test run tabs).
 
-        Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. The analysisMode field reports which provider produced the file problems: "open_daemon" (file open in an editor) or "closed_batch" (public batch analysis); null when no analysis ran.
+        Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. Single-file calls report legacy top-level analysis metadata. Multi-file calls return one aggregate problems list plus fileAnalyses entries with mode, freshness, timeout, message, returned problemCount, and problemsTruncated metadata for each file. Code problems share a 100-item response cap; top-level problemsTruncated reports omitted problems. Fresh analysis does not imply complete output: re-query truncated files individually, narrowing startLine/endLine if needed.
 
-        At least one source must be active: provide 'file' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine all three.
+        At least one source must be active: provide exactly one of 'file' or 'files' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine file analysis with build and test results. A multi-file call accepts at most 100 supplied paths, all sharing one analysis timeout budget; lexical aliases are analyzed only once.
 
         File analysis uses fresh daemon highlights for files that are already open in an editor. Closed files use public batch analysis, so weak warnings and quick-fix intentions may be less complete unless the file is open. The analyzed file is re-read from disk first, so results reflect edits made outside the IDE without calling ide_sync_files. For diagnostics across many files or the whole project with per-file coverage metadata, use ide_project_diagnostics.
 
-        Parameters: file (optional, enables code analysis), line + column (optional, for intentions, requires file), startLine/endLine (optional, requires file), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
+        Parameters: file or files (mutually exclusive, enable code analysis), line + column (optional, for intentions, single file only), startLine/endLine (optional, single file only), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
 
-        Example: {"file": "src/MyClass.java"} or {"includeBuildErrors": true, "severity": "errors"} or {"file": "src/MyClass.java", "includeBuildErrors": true, "includeTestResults": true}
+        Example: {"file": "src/MyClass.java"} or {"files": ["src/A.java", "src/B.java"]} or {"includeBuildErrors": true, "severity": "errors"}
     """.trimIndent()
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
         .file(required = false, description = "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). Optional — enables per-file code analysis.")
+        .property("files", buildJsonObject {
+            put("type", "array")
+            putJsonObject("items") {
+                put("type", "string")
+            }
+            put("minItems", 1)
+            put("maxItems", MAX_FILES)
+            put("uniqueItems", true)
+            put("description", "Project-relative file paths to analyze under one shared timeout budget (max $MAX_FILES). Mutually exclusive with 'file'.")
+        })
         .intProperty("line", "1-based line number for intention lookup. Optional, defaults to 1. Requires file.")
         .intProperty("column", "1-based column number for intention lookup. Optional, defaults to 1. Requires file.")
         .intProperty("startLine", "Filter problems to start from this line. Optional. Requires file.")
@@ -86,7 +108,49 @@ class GetDiagnosticsTool : AbstractMcpTool() {
 
     override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
         // Parse arguments
-        val filePath = arguments["file"]?.jsonPrimitive?.content
+        val rawFile = arguments["file"]
+        val rawFiles = arguments["files"]
+        val hasFileArgument = rawFile != null && rawFile != JsonNull
+        val hasFilesArgument = rawFiles != null && rawFiles != JsonNull
+        val filePath = if (hasFileArgument) {
+            (rawFile as? JsonPrimitive)
+                ?.takeIf { it.isString }
+                ?.contentOrNull
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: return createErrorResult("Parameter 'file' must be a non-blank project-relative path.")
+        } else {
+            null
+        }
+        val filePaths = if (hasFilesArgument) {
+            val paths = (rawFiles as? JsonArray)
+                ?: return createErrorResult("Parameter 'files' must be an array of project-relative paths.")
+            if (paths.size > MAX_FILES) {
+                return createErrorResult("Parameter 'files' supports at most $MAX_FILES paths per request.")
+            }
+            // Use the normalized path only as the deduplication key. Keeping the first supplied
+            // representation makes fileAnalyses and problem locations echo a caller's request,
+            // while preventing aliases such as src/A.java and src/./A.java from consuming the
+            // shared analysis budget twice.
+            val firstPathByNormalizedPath = linkedMapOf<String, String>()
+            paths.forEachIndexed { index, element ->
+                val requestedPath = (element as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.contentOrNull
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: return createErrorResult("Parameter 'files[$index]' must be a non-blank project-relative path.")
+                val normalizedPath = try {
+                    normalizeProjectRelativePath(requestedPath)
+                } catch (e: IllegalArgumentException) {
+                    return createErrorResult("Parameter 'files[$index]' ${e.message}")
+                }
+                firstPathByNormalizedPath.putIfAbsent(normalizedPath, requestedPath)
+            }
+            firstPathByNormalizedPath.values.toList()
+        } else {
+            null
+        }
         val line = arguments["line"]?.jsonPrimitive?.intOrNull ?: 1
         val column = arguments["column"]?.jsonPrimitive?.intOrNull ?: 1
         val startLine = arguments["startLine"]?.jsonPrimitive?.intOrNull
@@ -98,23 +162,35 @@ class GetDiagnosticsTool : AbstractMcpTool() {
         val maxBuildErrors = (arguments[ParamNames.MAX_BUILD_ERRORS]?.jsonPrimitive?.intOrNull ?: 100).coerceIn(1, 500)
         val maxTestResults = (arguments[ParamNames.MAX_TEST_RESULTS]?.jsonPrimitive?.intOrNull ?: 100).coerceIn(1, 500)
 
-        // Validate: at least one source must be active
-        if (filePath == null && !includeBuildErrors && !includeTestResults) {
-            return createErrorResult("At least one source must be active: provide 'file' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results.")
+        if (hasFileArgument && hasFilesArgument) {
+            return createErrorResult("Parameters 'file' and 'files' are mutually exclusive; provide exactly one of them for code analysis.")
         }
 
-        // Validate: startLine/endLine require file
-        if (filePath == null && (startLine != null || endLine != null)) {
-            return createErrorResult("Parameters 'startLine' and 'endLine' require 'file' to be specified.")
+        if (hasFilesArgument && filePaths.isNullOrEmpty()) {
+            return createErrorResult("Parameter 'files' must contain at least one project-relative file path.")
+        }
+
+        // Location filters and intention lookup only have unambiguous semantics for one file.
+        val hasLocationArguments = listOf("line", "column", "startLine", "endLine")
+            .any { name -> arguments[name]?.let { it != JsonNull } == true }
+        if (filePath == null && hasLocationArguments) {
+            return createErrorResult("Parameters 'line', 'column', 'startLine', and 'endLine' are only supported with the single 'file' parameter.")
+        }
+
+        // Validate: at least one source must be active
+        if (filePath == null && filePaths.isNullOrEmpty() && !includeBuildErrors && !includeTestResults) {
+            return createErrorResult("At least one source must be active: provide 'file' or 'files' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results.")
         }
 
         // File diagnostics
-        var problems: List<com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ProblemInfo>? = null
+        var problems: List<ProblemInfo>? = null
+        var problemsTruncated: Boolean? = null
         var intentions: List<IntentionInfo>? = null
         var analysisFresh: Boolean? = null
         var analysisTimedOut: Boolean? = null
         var analysisMessage: String? = null
         var analysisMode: String? = null
+        var fileAnalyses: List<FileDiagnosticsAnalysis>? = null
 
         if (filePath != null) {
             requireSmartMode(project)
@@ -129,7 +205,8 @@ class GetDiagnosticsTool : AbstractMcpTool() {
                 severity = severity,
                 startLine = startLine,
                 endLine = endLine,
-                maxProblems = MAX_PROBLEMS
+                // One-item lookahead distinguishes exactly-at-limit output from truncation.
+                maxProblems = MAX_PROBLEMS + 1
             )
             // analyzeFile refreshes the file from disk, so it can discover the file is gone; the
             // VirtualFile is then invalid and every PSI lookup below it throws.
@@ -137,10 +214,17 @@ class GetDiagnosticsTool : AbstractMcpTool() {
                 return createErrorResult("File no longer exists on disk: $filePath")
             }
 
-            problems = analysisResult.problems
+            problems = analysisResult.problems.take(MAX_PROBLEMS)
+            problemsTruncated = analysisResult.problems.size > MAX_PROBLEMS
             analysisFresh = analysisResult.analysisFresh
             analysisTimedOut = analysisResult.analysisTimedOut
             analysisMessage = analysisResult.analysisMessage
+            if (problemsTruncated) {
+                analysisMessage = appendAnalysisMessage(
+                    analysisMessage,
+                    "Problem output was truncated at $MAX_PROBLEMS items. Re-query with narrower startLine/endLine filters."
+                )
+            }
             analysisMode = analysisResult.analysisMode
             intentions = analyzeIntentions(
                 project = project,
@@ -157,6 +241,81 @@ class GetDiagnosticsTool : AbstractMcpTool() {
                     "Intentions are unavailable because the file is not open in an editor."
                 )
             }
+        } else if (filePaths != null) {
+            requireSmartMode(project)
+
+            val analysisService = DiagnosticsAnalysisService.getInstance(project)
+            val deadlineNanos = System.nanoTime() + analysisService.configuredAnalysisTimeoutMs() * 1_000_000L
+            val aggregateProblems = mutableListOf<ProblemInfo>()
+            val perFileAnalyses = mutableListOf<FileDiagnosticsAnalysis>()
+            problemsTruncated = false
+
+            for (path in filePaths) {
+                val remainingMs = remainingBudgetMs(deadlineNanos)
+                if (remainingMs == null) {
+                    perFileAnalyses += sharedBudgetExhausted(path)
+                    continue
+                }
+
+                val virtualFile = resolveFile(project, path)
+                if (virtualFile == null) {
+                    perFileAnalyses += FileDiagnosticsAnalysis(
+                        file = path,
+                        mode = null,
+                        fresh = false,
+                        timedOut = false,
+                        message = "File not found: $path"
+                    )
+                    continue
+                }
+
+                val analysisRemainingMs = remainingBudgetMs(deadlineNanos)
+                if (analysisRemainingMs == null) {
+                    perFileAnalyses += sharedBudgetExhausted(path)
+                    continue
+                }
+
+                val remainingProblemSlots = MAX_PROBLEMS - aggregateProblems.size
+                val analysisResult = analysisService.analyzeFile(
+                    virtualFile = virtualFile,
+                    filePath = path,
+                    severity = severity,
+                    startLine = null,
+                    endLine = null,
+                    // Still probe a file when no slots remain, so hidden errors are never
+                    // presented as an empty, complete result for that file.
+                    maxProblems = remainingProblemSlots + 1,
+                    timeoutMs = analysisRemainingMs
+                )
+
+                val returnedProblems = analysisResult.problems.take(remainingProblemSlots)
+                val fileProblemsTruncated = analysisResult.problems.size > remainingProblemSlots
+                aggregateProblems += returnedProblems
+                if (fileProblemsTruncated) problemsTruncated = true
+                var message = when {
+                    !virtualFile.isValid -> "File no longer exists on disk: $path"
+                    else -> analysisResult.analysisMessage
+                }
+                if (fileProblemsTruncated) {
+                    message = appendAnalysisMessage(
+                        message,
+                        "Problems from this file were omitted by the shared $MAX_PROBLEMS-item response cap. " +
+                            "Re-query this path using 'file', narrowing startLine/endLine if needed."
+                    )
+                }
+                perFileAnalyses += FileDiagnosticsAnalysis(
+                    file = path,
+                    mode = analysisResult.analysisMode,
+                    fresh = analysisResult.analysisFresh,
+                    timedOut = analysisResult.analysisTimedOut,
+                    message = message,
+                    problemCount = returnedProblems.size,
+                    problemsTruncated = fileProblemsTruncated
+                )
+            }
+
+            problems = aggregateProblems
+            fileAnalyses = perFileAnalyses
         }
 
         // Build errors
@@ -199,11 +358,13 @@ class GetDiagnosticsTool : AbstractMcpTool() {
             problems = problems,
             intentions = intentions,
             problemCount = problems?.size,
+            problemsTruncated = problemsTruncated,
             intentionCount = intentions?.size,
             analysisFresh = analysisFresh,
             analysisTimedOut = analysisTimedOut,
             analysisMessage = analysisMessage,
             analysisMode = analysisMode,
+            fileAnalyses = fileAnalyses,
             buildErrors = buildErrors,
             buildErrorCount = buildErrorCount,
             buildWarningCount = buildWarningCount,
@@ -214,6 +375,50 @@ class GetDiagnosticsTool : AbstractMcpTool() {
             testResultsTruncated = testResultsTruncated
         ))
     }
+
+    private fun remainingBudgetMs(deadlineNanos: Long): Long? {
+        val remainingNanos = deadlineNanos - System.nanoTime()
+        if (remainingNanos <= 0L) return null
+        return ((remainingNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
+    }
+
+    /**
+     * Returns a lexical, project-relative key without consulting the filesystem. This is used
+     * before analysis so aliases cannot repeat work, and it deliberately permits an internal
+     * `dir/../File.java` segment while rejecting a path that still escapes after normalization.
+     */
+    private fun normalizeProjectRelativePath(requestedPath: String): String {
+        if (
+            requestedPath.startsWith('/') ||
+            requestedPath.startsWith('\\') ||
+            WINDOWS_DRIVE_PATH.matches(requestedPath)
+        ) {
+            throw IllegalArgumentException("must be a project-relative path.")
+        }
+
+        val path = try {
+            Path.of(requestedPath)
+        } catch (_: InvalidPathException) {
+            throw IllegalArgumentException("is not a valid project-relative path.")
+        }
+        if (path.isAbsolute) {
+            throw IllegalArgumentException("must be a project-relative path.")
+        }
+
+        val normalized = path.normalize()
+        if (normalized.nameCount > 0 && normalized.getName(0).toString() == "..") {
+            throw IllegalArgumentException("must not escape the project root through path traversal.")
+        }
+        return normalized.toString()
+    }
+
+    private fun sharedBudgetExhausted(file: String) = FileDiagnosticsAnalysis(
+        file = file,
+        mode = null,
+        fresh = false,
+        timedOut = true,
+        message = "Shared diagnostics analysis timeout budget was exhausted before this file could be analyzed."
+    )
 
     private suspend fun analyzeIntentions(
         project: Project,

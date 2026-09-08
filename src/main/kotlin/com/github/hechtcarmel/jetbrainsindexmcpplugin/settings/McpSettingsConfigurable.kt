@@ -31,7 +31,9 @@ import org.jetbrains.annotations.VisibleForTesting
 import java.awt.FlowLayout
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
+import java.net.IDN
 import java.net.InetAddress
+import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.util.function.Supplier
@@ -606,6 +608,7 @@ class McpSettingsConfigurable : Configurable {
 
     companion object {
         private val IPV4_PATTERN = Regex("^[0-9.]+\$")
+        private val HOSTNAME_LABEL_PATTERN = Regex("^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\$")
 
         @VisibleForTesting
         fun isValidIpv4(host: String): Boolean {
@@ -627,7 +630,23 @@ class McpSettingsConfigurable : Configurable {
                 return isValidIpv4(trimmedHost)
             }
 
-            // Fallback for hostnames
+            // InetAddress delegates to the system resolver, which may be configured with a
+            // wildcard DNS suffix and report even syntactically invalid input as resolvable.
+            // Validate IPv6/hostname syntax first so resolution cannot turn values containing
+            // underscores or URI punctuation into accepted bind addresses.
+            if (trimmedHost.contains(':')) {
+                return runCatching { InetAddress.getByName(trimmedHost) is Inet6Address }
+                    .getOrDefault(false)
+            }
+            val asciiHost = runCatching { IDN.toASCII(trimmedHost.removeSuffix(".")) }
+                .getOrNull()
+                ?: return false
+            if (asciiHost.isEmpty() || asciiHost.length > 253 ||
+                asciiHost.split('.').any { !HOSTNAME_LABEL_PATTERN.matches(it) }
+            ) {
+                return false
+            }
+
             return runCatching { InetAddress.getByName(trimmedHost) }.isSuccess
         }
     }

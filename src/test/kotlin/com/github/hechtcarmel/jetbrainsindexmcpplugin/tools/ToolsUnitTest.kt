@@ -15,7 +15,9 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.FindUsage
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.TypeHierarchyTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.project.CreateModuleTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ChangeSignatureTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.RenameSymbolTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.SafeDeleteTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.isExcludedPath
 import io.mockk.every
@@ -27,6 +29,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 class ToolsUnitTest : TestCase() {
     private fun assertHasScopeAndNoLegacyFilters(toolName: String, properties: kotlinx.serialization.json.JsonObject?) {
@@ -93,6 +96,23 @@ class ToolsUnitTest : TestCase() {
         }
     }
 
+    fun testRefactoringPreviewsStillParticipateInConfiguredPsiSync() {
+        val previewArguments = buildJsonObject {
+            put(ParamNames.DRY_RUN, true)
+        }
+
+        listOf(
+            RenameSymbolTool(),
+            SafeDeleteTool(),
+            ChangeSignatureTool()
+        ).forEach { tool ->
+            assertTrue(
+                "${tool.name} dry-run must honor configured VFS/PSI synchronization",
+                tool.needsPsiSync(previewArguments)
+            )
+        }
+    }
+
     // ── rename mode resolution ─────────────────────────────────────────────────
 
     fun testRenameSymbolToolResolvesFileModeWhenTargetTypeFileEvenWithZeroCoordinates() {
@@ -138,6 +158,25 @@ class ToolsUnitTest : TestCase() {
         )
 
         assertEquals("Symbol rename should reject malformed coordinates", "InvalidRenameMode", decision.javaClass.simpleName)
+    }
+
+    fun testRenameSymbolToolDoesNotReinterpretNestedPositionAsFileTarget() {
+        val normalized = UnifiedTargetArguments.normalize(
+            buildJsonObject {
+                put(ParamNames.TARGET_TYPE_CAMEL, kotlinx.serialization.json.JsonPrimitive("file"))
+                putJsonObject("target") {
+                    putJsonObject("position") {
+                        put("file", "src/Target.java")
+                        put("line", 4)
+                        put("column", 8)
+                    }
+                }
+            }
+        ).getOrThrow()
+
+        val decision = RenameSymbolTool.resolveRenameMode(normalized)
+
+        assertEquals("Nested position always denotes a symbol target", "InvalidRenameMode", decision.javaClass.simpleName)
     }
 
     private fun invokeRenameModeResolver(targetType: String?, line: Int?, column: Int?): Any {

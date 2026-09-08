@@ -452,8 +452,9 @@ call sites". It is thin in these areas:
   most for `ide_reformat_code` and `ide_optimize_imports`.
 - **Reflection-based language handlers are largely unverified.** Python, Go, PHP and Rust handlers
   are reached only through reflection against plugins absent from the test classpath. The Python
-  hierarchy and call-hierarchy handlers have no automated coverage at all — verify changes to them
-  in the corresponding IDE by hand.
+  hierarchy and native caller lookup still need verification in the corresponding IDE. The
+  post-native caller collection path has neutral-PSI regression fixtures for scope filtering,
+  limits, and declaration identity; these do not exercise the Python plugin's reflection API.
 - **No test exercises real Kotlin PSI.** The Kotlin plugin is not on the test classpath, so every
   Kotlin-specific code path — light-class handling in `JavaHandlers.kt`, `KtProperty` resolution in
   `JavaSymbolReferenceHandler`, the Kotlin branches of the refactoring tools — is covered only by

@@ -19,10 +19,10 @@ These tools work in every supported JetBrains IDE:
 | `ide_find_file` | Search files by name | Enabled |
 | `ide_find_symbol` | Search code symbols by name *(disabled by default)* | Disabled |
 | `ide_search_text` | Text search using IntelliJ Find in Files (substring + regex) | Enabled |
-| `ide_diagnostics` | Analyze file problems with fresh IDE diagnostics, plus optional build/test results | Enabled |
+| `ide_diagnostics` | Analyze one file or a small multi-file batch under one shared budget, plus optional build/test results | Enabled |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata; long analyses return an `analysisId` to poll | Disabled |
 | `ide_index_status` | Check indexing status | Enabled |
-| `ide_sync_files` | Force sync VFS/PSI cache | Enabled |
+| `ide_sync_files` | Force sync VFS/PSI cache, including deleted paths through existing parents | Enabled |
 | `ide_reload_project` | Reload linked Maven/Gradle build models | Disabled |
 | `ide_import_modules` | Import external Maven projects as modules | Disabled |
 | `ide_open_workspace` | Scan root directory for Maven projects, or open an explicit module list, in one window | Disabled |
@@ -32,12 +32,12 @@ These tools work in every supported JetBrains IDE:
 | `ide_read_file` | Read file content by path or qualified name | Disabled |
 | `ide_get_active_file` | Get currently active editor file(s) | Disabled |
 | `ide_open_file` | Open file in editor with navigation | Disabled |
-| `ide_refactor_rename` | Rename symbol with reference updates (all languages) | Enabled |
+| `ide_refactor_rename` | Preview or rename a symbol with reference updates (all languages) | Enabled |
 | `ide_move_file` | Move file to new directory with IDE-aware move semantics | Enabled |
 | `ide_reformat_code` | Reformat code using project code style | Disabled |
 | `ide_optimize_imports` | Optimize imports without reformatting code | Disabled |
 | `ide_structural_search_replace` | Pattern-based code search and transformation (Java, Kotlin) | Disabled |
-| `ide_change_signature` | Change method signature with automatic caller updates (Java) | Disabled |
+| `ide_change_signature` | Preview or change a method signature with automatic caller updates (Java) | Disabled |
 | `ide_create_file` | Create a new source file with content, immediately indexed by IntelliJ | Disabled |
 | `ide_replace_text_in_file` | Find and replace text using IntelliJ's Document API | Disabled |
 | `ide_edit_member` | Replace an entire member declaration (signature + body) with new content (Java, Kotlin) | Disabled |
@@ -50,11 +50,11 @@ These tools activate based on available language plugins:
 
 | Tool | Description | Languages |
 |------|-------------|-----------|
-| `ide_type_hierarchy` | Get type inheritance hierarchy | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
-| `ide_call_hierarchy` | Analyze method call relationships | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
+| `ide_type_hierarchy` | Get bounded, cursor-paginated type hierarchy pages | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
+| `ide_call_hierarchy` | Get bounded, cursor-paginated caller/callee pages | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
 | `ide_find_implementations` | Find interface implementations | Java, Kotlin, Python, JS/TS, PHP, Rust |
 | `ide_find_super_methods` | Find overridden methods | Java, Kotlin, Python, JS/TS, PHP |
-| `ide_file_structure` | Hierarchical file structure with start/end line numbers *(disabled by default)* | Java, Kotlin, Python, JS/TS, PHP, Markdown |
+| `ide_file_structure` | Compatible formatted outline plus structured PSI-bound nodes *(disabled by default)* | Java, Kotlin, Python, JS/TS, PHP, Markdown |
 
 ### Java-Specific Tools
 
@@ -62,7 +62,7 @@ These tools activate based on available language plugins:
 |------|-------------|
 | `ide_list_tests` | List all test methods/classes discovered by the IDE's test frameworks *(disabled by default)* |
 | `ide_convert_java_to_kotlin` | Convert Java files to Kotlin using the IDE converter *(disabled by default)* |
-| `ide_refactor_safe_delete` | Safely delete with usage check |
+| `ide_refactor_safe_delete` | Preview or safely delete with usage checking |
 
 ### Project Lifecycle Management Tools
 
@@ -165,7 +165,7 @@ All tools accept an optional `project_path` parameter:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `project_path` | string | No | Absolute path to the project root. Required when multiple projects are open in the IDE. For workspace projects, use the sub-project path. |
+| `project_path` | string | No | Absolute path to the project root. Required when multiple projects are open unless the call targets a valid `symbolId`, whose owning project is inferred. For workspace projects, use the sub-project path. |
 
 ### Position Parameters
 
@@ -177,6 +177,107 @@ Most tools operate on a specific location in code and require these parameters:
 | `line` | integer | 1-based line number |
 | `column` | integer | 1-based column number. For dotted expressions like `json.dumps()` or `os.path.join()`, point to the member token (`dumps`, `join`) when targeting the member definition. |
 
+### Opaque Symbol IDs
+
+Semantic discovery calls return `symbolId`, an opaque handle to the exact PSI declaration. Use it
+instead of `file` + `line` + `column` or `language` + `symbol` when chaining calls. It is accepted
+by `ide_find_references`, `ide_find_definition`, `ide_symbol_info`, `ide_type_hierarchy`,
+`ide_call_hierarchy`, `ide_find_implementations`, `ide_find_super_methods`,
+`ide_refactor_rename`, `ide_change_signature`, `ide_edit_member`, `ide_replace_member`, and
+`ide_refactor_safe_delete`. Target selectors are mutually exclusive: when `symbolId` is present,
+omit coordinates and name-based selectors.
+
+The ID is backed only by an IntelliJ `SmartPsiElementPointer` inside the running MCP server. It is
+scoped to the exact project instance and MCP server generation, kept in a 4,096-entry access-order
+LRU, and expires after one hour without access. A line shift does not invalidate it. Server/MCP
+restart, LRU/TTL expiry, deleting the declaration/file, or an unrestorable pointer returns
+`SYMBOL_ID_EXPIRED`; the server never chooses the nearest element. Rediscover the declaration to
+obtain a new ID. Successful refactorings return current `updatedSymbol` metadata with the same ID
+when it can be rebound (otherwise a new one); safe delete returns `invalidatedSymbolId`.
+
+The handle is intentionally non-canonical. The same PSI symbol can have several unequal,
+simultaneously valid IDs, and ID equality must never be used as symbol equality. Reusing one
+particular handle is stable across line shifts and rename while its session/project/TTL/LRU bounds
+remain valid.
+
+```json
+{
+  "name": "ide_symbol_info",
+  "arguments": { "symbolId": "sym_opaque-value-from-a-prior-result" }
+}
+```
+
+### Structured Target
+
+Target-aware semantic and symbol-refactoring tools accept the new nested form below in addition to
+all legacy top-level selectors. Choose exactly one variant and do not mix `target` with top-level
+`symbolId`, `file`/`line`/`column`, `language`/`symbol`, or a tool-specific selector such as
+`className`:
+
+```json
+{ "target": { "symbolId": "sym_..." } }
+{ "target": { "position": { "file": "src/Foo.kt", "line": 12, "column": 9 } } }
+{ "target": { "qualifiedName": "com.example.Foo#bar", "language": "Kotlin" } }
+```
+
+Validation is performed at runtime so clients whose JSON Schema implementation does not support
+union combinators still receive a portable schema. A nested `target.symbolId` also routes the call
+to its exact owning project instance when several projects are open.
+
+After installing a new plugin build and reloading/restarting the IDE, reconnect or restart the MCP
+client before checking these fields. Clients such as Codex cache `ALL_TOOLS`, so an existing
+connection may retain the previous input schemas. A fresh `initialize` → `tools/list` publishes the
+current schema. The server advertises `tools.listChanged: false`; it does not promise tool-list
+change notifications on the current transports.
+
+### Semantic Class Metadata
+
+Kotlin declarations are classified from Kotlin PSI semantics: `INTERFACE`, `CLASS`, `ENUM`,
+`ANNOTATION`, and `OBJECT` are distinct even though several share the same runtime PSI class.
+Semantic results use Kotlin `getFqName()` through the common qualified-name path when available.
+Anonymous implementations deliberately have no qualified name; their display name identifies the
+base type and source location, for example
+`<anonymous implementation of SomeInterface at File.kt:42>` with `qualifiedName: null`.
+
+### Refactoring Preview Contract
+
+`ide_refactor_rename`, `ide_refactor_safe_delete`, and `ide_change_signature` accept
+`dryRun: true`. The request follows normal target resolution, validation, usage discovery, and
+conflict discovery, but does not enter the refactoring/source-write phase, save documents, or
+create an undo command.
+File contents therefore remain byte-for-byte unchanged.
+
+All three tools return the same top-level preview shape:
+
+```json
+{
+  "dryRun": true,
+  "canApply": true,
+  "target": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "kind": "method",
+    "container": "com.example.UserService",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "qualifiedName": "com.example.UserService#findUser",
+    "language": "Java"
+  },
+  "plannedChange": { "operation": "rename", "from": "findUser", "to": "findUserById" },
+  "affectedFiles": ["src/main/java/com/example/UserService.java"],
+  "usageCount": 4,
+  "conflictCount": 0,
+  "warnings": [],
+  "elapsedMs": 18
+}
+```
+
+`canApply: false` means the preview found a blocker or could not complete discovery; inspect
+`warnings` and `conflictCount`. `affectedFiles` is an estimate from the preview search. To apply,
+send the operation again with `dryRun` omitted or `false`; a preview itself is never an apply token
+and does not reserve project state.
+
 ### Symbol Reference Parameters
 
 Some tools support identifying the target element by fully qualified symbol reference instead of file position. The following parameters are available as an alternative to `file` + `line` + `column`:
@@ -186,7 +287,8 @@ Some tools support identifying the target element by fully qualified symbol refe
 | `language` | string | Language of the symbol (e.g., `"Java"`). Required when using `symbol`. Unsupported languages are rejected at runtime; use `file` + `line` + `column` for languages without symbol-reference support. |
 | `symbol` | string | Fully qualified symbol reference. **Java format:** `com.example.ClassName`, `com.example.ClassName#memberName`. **JS/TS format:** `modulePath#exportName`, `modulePath#default`, or `modulePath#ClassName.memberName`. |
 
-**Important:** The two parameter groups are **mutually exclusive** — provide either `file` + `line` + `column` OR `language` + `symbol`, not both.
+**Important:** The three target forms are **mutually exclusive** — provide `symbolId`, `file` +
+`line` + `column`, or `language` + `symbol`, not more than one.
 
 **Supported languages:** Java, JavaScript, TypeScript, Python, and PHP. Availability is dynamic — a language is accepted only when its plugin is installed (e.g., Python in PyCharm, PHP in PhpStorm). Unsupported languages return an explicit error listing the currently supported symbol-reference languages.
 
@@ -246,12 +348,13 @@ Finds all references to a symbol across the entire project using IntelliJ's sema
 - Understanding code dependencies
 - Preparing for refactoring
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Opaque ID returned by a previous semantic result. Omit all other target selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -325,7 +428,18 @@ Finds all references to a symbol across the entire project using IntelliJ's sema
   "totalCollected": 2,
   "offset": 0,
   "pageSize": 100,
-  "stale": false
+  "stale": false,
+  "resolvedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "kind": "method",
+    "container": "com.example.UserService",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "qualifiedName": "com.example.UserService#findUser(java.lang.String)",
+    "language": "Java"
+  }
 }
 ```
 
@@ -347,12 +461,13 @@ Finds the definition/declaration location of a symbol at a given source location
 - Understanding where a method, class, variable, or field is declared
 - Looking up the original definition from a usage site
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Opaque ID returned by a previous semantic result. Omit all other target selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -396,6 +511,7 @@ Finds the definition/declaration location of a symbol at a given source location
 
 ```json
 {
+  "symbolId": "sym_opaque-handle",
   "file": "src/main/java/com/example/UserService.java",
   "line": 15,
   "column": 17,
@@ -431,12 +547,13 @@ types as the IDE resolved them.
 | `quick_navigation` | Any language with a documentation provider — Kotlin, Python, JS/TS, Go, PHP, Rust | As that language's Quick Documentation renders them; often short |
 | `element_text` | No documentation provider answered | The declaration's own source line |
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Opaque ID returned by a previous semantic result. Omit all other target selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -466,6 +583,7 @@ types as the IDE resolved them.
 
 ```json
 {
+  "symbolId": "sym_opaque-handle",
   "name": "findUser",
   "kind": "method",
   "qualifiedName": "com.example.UserService#findUser(java.lang.String)",
@@ -493,7 +611,7 @@ passed straight back to `ide_find_references`, `ide_call_hierarchy`, or `ide_fin
 as the `symbol` argument. A callable includes its resolved parameter list, because the bare
 `Container#name` form is rejected as ambiguous as soon as the method is overloaded. On the other
 `signatureSource` paths the container is a best-effort dotted AST path rather than a resolved FQN,
-so address those symbols by position instead.
+so address those symbols by `symbolId` or position instead.
 
 ---
 
@@ -546,6 +664,7 @@ Searches for classes and interfaces by name using the IDE's class index.
 {
   "classes": [
     {
+      "symbolId": "sym_user-service",
       "name": "UserService",
       "qualifiedName": "com.example.service.UserService",
       "kind": "INTERFACE",
@@ -709,7 +828,11 @@ Analyzes code diagnostics from three sources:
 - optional build output from the last build,
 - optional test results from open test run tabs.
 
-File problems are collected through explicit daemon analysis, so they do not depend on the target project window being active. Intentions/quick fixes are best-effort and require the file to already be open in an editor.
+File problems are collected through explicit daemon analysis, so they do not depend on the target
+project window being active. Analyze either one `file` or a non-empty `files` list. Multi-file calls
+share one configured analysis timeout budget for the whole request, rather than restarting the
+budget for every file. Intentions/quick fixes are best-effort, require the file to already be open
+in an editor, and are available only in single-file mode.
 
 **Use when:**
 - Finding code issues in a file
@@ -723,11 +846,12 @@ File problems are collected through explicit daemon analysis, so they do not dep
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | No | Path to the file relative to project root. Enables per-file code analysis. At least one of `file`, `includeBuildErrors`, or `includeTestResults` must be provided |
-| `line` | integer | No | 1-based line number for intention lookup (default: 1) |
-| `column` | integer | No | 1-based column number for intention lookup (default: 1) |
-| `startLine` | integer | No | Filter problems to start from this line |
-| `endLine` | integer | No | Filter problems to end at this line |
+| `file` | string | No | One project-relative file to analyze. Mutually exclusive with `files`. At least one of `file`, `files`, `includeBuildErrors`, or `includeTestResults` must be provided |
+| `files` | string[] | No | Up to 100 non-empty, unique project-relative file paths analyzed under one shared timeout budget. Mutually exclusive with `file` |
+| `line` | integer | No | 1-based line number for intention lookup (default: 1). Single `file` only |
+| `column` | integer | No | 1-based column number for intention lookup (default: 1). Single `file` only |
+| `startLine` | integer | No | Filter problems to start from this line. Single `file` only |
+| `endLine` | integer | No | Filter problems to end at this line. Single `file` only |
 | `includeBuildErrors` | boolean | No | Include errors/warnings from the last build (default: `false`) |
 | `includeTestResults` | boolean | No | Include test results from open test run tabs (default: `false`) |
 | `severity` | string | No | Filter diagnostics by `all`, `errors`, or `warnings` (default: `all`) |
@@ -764,6 +888,24 @@ File problems are collected through explicit daemon analysis, so they do not dep
 }
 ```
 
+**Example Request (multiple files):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_diagnostics",
+    "arguments": {
+      "files": [
+        "src/main/java/com/example/UserService.java",
+        "src/main/java/com/example/UserController.java"
+      ],
+      "severity": "errors"
+    }
+  }
+}
+```
+
 **Example Response:**
 
 ```json
@@ -793,8 +935,11 @@ File problems are collected through explicit daemon analysis, so they do not dep
 - `analysisTimedOut = true` means the file analysis budget was exceeded; build/test sections may still be returned.
 - `analysisMessage` explains degraded cases such as timeouts or missing live editor context for intentions.
 - `analysisMode` reports which analysis path produced the file problems: `open_daemon` (file open in an editor, fresh daemon highlights) or `closed_batch` (public batch analysis); `null` when no analysis ran.
+- The four legacy top-level analysis fields above apply to single-file calls. Multi-file calls return one aggregate `problems` list and `fileAnalyses: [{file, mode, fresh, timedOut, message, problemCount, problemsTruncated}]`, including an entry for a missing, deleted, failed, or unprocessed requested file.
+- Code problems share a 100-item response cap. Top-level `problemsTruncated` reports known omissions (absent without code analysis); each file's flag identifies affected paths and its `problemCount` counts returned problems, not all detected problems. A file can be fresh with zero returned problems and `problemsTruncated: true`. Re-query such a path using `file`, narrowing `startLine`/`endLine` if needed. A false flag only means no collected problems were omitted by the cap; check freshness/timeouts separately.
+- The multi-file timeout is shared. Once it is exhausted, remaining files are reported with `fresh: false`, `timedOut: true`, and an explanatory `message`; they do not each receive another full timeout.
 - The analyzed file is refreshed from disk and committed to PSI before analysis, so problems describe the file as it is on disk. There is no need to call `ide_sync_files` first after editing a file with an external tool.
-- `line` and `column` affect intention lookup only; file problems are collected for the whole file, then filtered by `startLine` / `endLine` if provided.
+- `line` and `column` affect intention lookup only; file problems are collected for the whole file, then filtered by `startLine` / `endLine` if provided. All four location fields are rejected with `files`.
 
 **Severity Values:**
 - `ERROR` - Compilation error
@@ -958,7 +1103,7 @@ Force the IDE to synchronize its virtual file system and PSI cache with external
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `paths` | array of strings | No | File or directory paths relative to project root to sync. If omitted, syncs the entire project |
+| `paths` | string[] | No | File or directory paths relative to the selected project/content root. A deleted path refreshes its nearest existing parent. Absolute paths, `..` traversal, and symlink escapes are rejected. If omitted or empty, syncs the entire selected root |
 
 **Example Request:**
 
@@ -980,9 +1125,19 @@ Force the IDE to synchronize its virtual file system and PSI cache with external
 {
   "syncedPaths": ["src/main/java/com/example/NewFile.java"],
   "syncedAll": false,
-  "message": "Synced 1 path(s)"
+  "message": "Synchronized 1 path(s).",
+  "requestedPaths": ["src/main/java/com/example/NewFile.java"],
+  "refreshedRoots": ["src/main/java/com/example/NewFile.java"],
+  "deletedPaths": []
 }
 ```
+
+For a requested path that no longer exists, `requestedPaths` and `deletedPaths` preserve the
+original relative path while `refreshedRoots` identifies the nearest existing parent actually
+marked dirty and recursively refreshed. Overlapping targets are reduced to the minimum set of
+refresh roots. The complete batch is validated before the VFS is touched, so one escaping or
+unsafe path fails the call without partially refreshing earlier paths. Neither `paths` nor a
+`project_path` routing hint can escape the selected project's base/content roots.
 
 ---
 
@@ -1484,6 +1639,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
 {
   "symbols": [
     {
+      "symbolId": "sym_user-service",
       "name": "UserService",
       "qualifiedName": "com.example.service.UserService",
       "kind": "INTERFACE",
@@ -1493,6 +1649,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
       "containerName": null
     },
     {
+      "symbolId": "sym_user-service-impl",
       "name": "UserServiceImpl",
       "qualifiedName": "com.example.service.UserServiceImpl",
       "kind": "CLASS",
@@ -1502,6 +1659,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
       "containerName": null
     },
     {
+      "symbolId": "sym_find-user",
       "name": "findUser",
       "qualifiedName": "com.example.service.UserService.findUser",
       "kind": "METHOD",
@@ -1524,6 +1682,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
 - `INTERFACE` - Interface
 - `ENUM` - Enum type
 - `ANNOTATION` - Annotation type
+- `OBJECT` - Kotlin object declaration
 - `RECORD` - Record class (Java 16+)
 - `METHOD` - Method
 - `FIELD` - Field or constant
@@ -1792,7 +1951,9 @@ Project 'myproject' is open and ready.
 
 ## Refactoring Tools
 
-> **Note**: All refactoring tools modify source files. Changes can be undone with Ctrl/Cmd+Z.
+> **Note**: Applying a refactoring modifies source files and can be undone with Ctrl/Cmd+Z.
+> `dryRun: true` on rename, safe delete, and change signature is strictly non-mutating and creates
+> no undo command.
 
 ### ide_refactor_rename
 
@@ -1806,6 +1967,7 @@ Renames a symbol or file and updates all references across the project. This too
 - **Automatic related element renaming** - getters/setters, overriding methods, test classes are renamed automatically
 - Explicit `targetType` mode selection (`symbol` or `file`)
 - Conflict detection before rename execution (returns error instead of showing dialog)
+- Read-only preview with usage/conflict discovery (`dryRun: true`)
 - Supports IDE undo for rename changes
 
 **Use when:**
@@ -1817,13 +1979,55 @@ Renames a symbol or file and updates all references across the project. This too
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file containing the symbol |
+| `target` | object | Conditional | Structured symbol selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | Conditional | Exact symbol handle. Omit `file`, `line`, and `column`; `targetType` may be omitted or set to `symbol`. |
+| `file` | string | Conditional | Path to the file containing the symbol, or the file to rename. Required for legacy position-based symbol lookup and file rename. |
+| `language` | string | Conditional | Legacy qualified-name selector language; requires `symbol` and is mutually exclusive with other target selectors. |
+| `symbol` | string | Conditional | Legacy qualified symbol name; requires `language` and is mutually exclusive with other target selectors. |
 | `targetType` | string | No | `symbol` (requires 1-based `line` + `column`) or `file` (renames the file itself; placeholder coordinates are ignored) |
 | `line` | integer | No | 1-based line number for symbol rename |
 | `column` | integer | No | 1-based column number for symbol rename |
 | `newName` | string | Yes | The new name for the symbol |
 | `overrideStrategy` | string | No | How to handle overriding methods: `"rename_base"` (default), `"rename_only_current"`, or `"ask"` |
 | `relatedRenamingStrategy` | string | No | How to handle automatic renaming of related symbols: `"all"` (default), `"none"`, `"accessors_and_tests"`, or `"ask"` |
+| `dryRun` | boolean | No | Resolve and validate the target, discover usages/conflicts, and return a preview without changing or saving files (default: `false`) |
+
+**Example Request (symbolId):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_rename",
+    "arguments": {
+      "symbolId": "sym_opaque-handle",
+      "newName": "findUserById"
+    }
+  }
+}
+```
+
+**Example Request (preview):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_rename",
+    "arguments": {
+      "target": { "symbolId": "sym_opaque-handle" },
+      "newName": "findUserById",
+      "dryRun": true
+    }
+  }
+}
+```
+
+The common preview response is described in [Refactoring Preview Contract](#refactoring-preview-contract).
+For rename, `plannedChange` contains `operation: "rename"`, `targetType`, `from`, `to`,
+`overrideStrategy`, and `relatedRenamingStrategy`. `canApply` is false when discovery is incomplete,
+the target/scope is read-only, an interactive-only plan cannot be represented exactly, or conflicts
+were found. The preview performs no refactoring/source write, document save, or undo registration.
 
 **Example Request (Java):**
 
@@ -1887,7 +2091,15 @@ Renames a symbol or file and updates all references across the project. This too
     "src/test/java/com/example/UserServiceTest.java"
   ],
   "changesCount": 3,
-  "message": "Successfully renamed 'findUser' to 'findUserById' (also renamed 2 related element(s))"
+  "message": "Successfully renamed 'findUser' to 'findUserById' (also renamed 2 related element(s))",
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUserById",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 
@@ -2139,6 +2351,12 @@ When `replacePattern` is omitted, the tool performs search-only and returns matc
 
 Replace an entire member declaration (signature + body) with new content. The tool locates the member by name, optional parameter count, and optional line number, then replaces the complete declaration.
 
+Replacement must contain one syntactically valid declaration of the original category, optionally
+surrounded by comments. Names/signatures may change, and nested declarations are allowed. Invalid
+or ambiguous content is rejected before editing; use `ide_refactor_safe_delete` for deletion.
+`updatedSymbol` identifies only the exact replacement, never its containing class. If the handle
+cannot be restored after an applied edit, it is invalidated and the response asks for rediscovery.
+
 **Languages:** Java, Kotlin.
 
 **Use when:**
@@ -2150,9 +2368,13 @@ Replace an entire member declaration (signature + body) with new content. The to
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file relative to project root |
+| `target` | object | Conditional | Exactly one nested selector: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Do not combine it with `symbolId`, `language`+`symbol`, `file`, `class`, `member`, `parameterCount`, or `line`. |
+| `symbolId` | string | Conditional | Exact member handle. Omit `file`, `class`, `member`, `parameterCount`, and `line`. |
+| `language` | string | Conditional | Legacy semantic lookup language; provide together with `symbol` and omit all other selectors. |
+| `symbol` | string | Conditional | Legacy qualified member name; provide together with `language` and omit all other selectors. |
+| `file` | string | Conditional | Path to the file relative to project root. Required when `symbolId` is omitted. |
 | `class` | string | No | Class name to scope the search (required for inner classes or when the member name is ambiguous) |
-| `member` | string | Yes | Name of the member to replace |
+| `member` | string | Conditional | Name of the member to replace. Required when `symbolId` is omitted. |
 | `parameterCount` | integer | No | Number of parameters to disambiguate overloaded methods |
 | `line` | integer | No | 1-based line number to disambiguate when multiple members share the same name |
 | `content` | string | Yes | The full replacement declaration (signature + body) |
@@ -2183,7 +2405,15 @@ Replace an entire member declaration (signature + body) with new content. The to
   "file": "src/main/java/com/example/UserService.java",
   "message": "Replaced method 'findUser' entirely",
   "startLine": 15,
-  "endLine": 18
+  "endLine": 18,
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 
@@ -2207,14 +2437,19 @@ Change a method's signature — name, return type, visibility, and parameters �
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file containing the method, relative to project root |
-| `line` | integer | Yes | 1-based line number of the method |
-| `column` | integer | Yes | 1-based column number of the method name |
+| `target` | object | Conditional | Structured method selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | Conditional | Exact method handle. Omit `file`, `line`, and `column`. |
+| `file` | string | Conditional | Path to the file containing the method, relative to project root. Required for legacy position lookup. |
+| `line` | integer | Conditional | 1-based line number of the method for legacy position lookup. |
+| `column` | integer | Conditional | 1-based column number of the method name for legacy position lookup. |
+| `language` | string | Conditional | Legacy qualified-name selector language; requires `symbol` and is mutually exclusive with other target selectors. |
+| `symbol` | string | Conditional | Legacy qualified method name; requires `language` and is mutually exclusive with other target selectors. |
 | `newName` | string | No | New method name (unchanged if omitted) |
 | `newReturnType` | string | No | New return type (unchanged if omitted) |
 | `newVisibility` | string | No | New visibility: `"public"`, `"protected"`, `"private"`, or `"package-private"` (unchanged if omitted; `"package-local"` is accepted as a legacy alias) |
 | `newParameters` | array | No | Array of parameter objects defining the new parameter list. Each object: `{ oldIndex, name, type, defaultValue }`. Use `oldIndex: -1` for new parameters. |
 | `generateDelegate` | boolean | No | Generate a delegate method with the old signature that calls the new one (default: false) |
+| `dryRun` | boolean | No | Resolve and validate the method, discover callers/conflicts, and return a preview without changing or saving files (default: `false`) |
 
 **`newParameters` object fields:**
 
@@ -2263,6 +2498,33 @@ Change a method's signature — name, return type, visibility, and parameters �
 }
 ```
 
+**Example Request (preview):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_change_signature",
+    "arguments": {
+      "target": { "symbolId": "sym_opaque-handle" },
+      "newName": "findUserById",
+      "newParameters": [
+        { "oldIndex": 0, "name": "id", "type": "String" },
+        { "oldIndex": -1, "name": "includeDeleted", "type": "boolean", "defaultValue": "false" }
+      ],
+      "dryRun": true
+    }
+  }
+}
+```
+
+The common preview response is described in [Refactoring Preview Contract](#refactoring-preview-contract).
+For change signature, `plannedChange` contains `operation: "changeSignature"`, the current
+signature in `before`, and the requested name/return type/visibility/parameters/delegate options in
+`requested`. `canApply` is false when discovery is incomplete, a target or affected file is
+read-only, or conflicts were found. Preview does not invoke the refactoring processor's write
+phase, save documents, or register undo.
+
 **Example Response:**
 
 ```json
@@ -2275,7 +2537,15 @@ Change a method's signature — name, return type, visibility, and parameters �
     "src/main/java/com/example/UserController.java",
     "src/test/java/com/example/UserServiceTest.java"
   ],
-  "changesCount": 5
+  "changesCount": 5,
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUserById",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 
@@ -2472,9 +2742,13 @@ Replace only the body of a method or the initializer of a field, preserving the 
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file relative to project root |
+| `target` | object | Conditional | Exactly one nested selector: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Do not combine it with `symbolId`, `language`+`symbol`, `file`, `class`, `member`, `parameterCount`, or `line`. |
+| `symbolId` | string | Conditional | Exact member handle. Omit `file`, `class`, `member`, `parameterCount`, and `line`. |
+| `language` | string | Conditional | Legacy semantic lookup language; provide together with `symbol` and omit all other selectors. |
+| `symbol` | string | Conditional | Legacy qualified member name; provide together with `language` and omit all other selectors. |
+| `file` | string | Conditional | Path to the file relative to project root. Required when `symbolId` is omitted. |
 | `class` | string | No | Class name to scope the search (required for inner classes or when the member name is ambiguous) |
-| `member` | string | Yes | Name of the member whose body/initializer to replace |
+| `member` | string | Conditional | Name of the member whose body/initializer to replace. Required when `symbolId` is omitted. |
 | `parameterCount` | integer | No | Number of parameters to disambiguate overloaded methods |
 | `line` | integer | No | 1-based line number to disambiguate when multiple members share the same name |
 | `content` | string | Yes | The new method body (without braces) or field initializer (without `=` sign) |
@@ -2505,7 +2779,15 @@ Replace only the body of a method or the initializer of a field, preserving the 
   "file": "src/main/java/com/example/UserService.java",
   "message": "Replaced body of method 'findUser'",
   "startLine": 16,
-  "endLine": 18
+  "endLine": 18,
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 
@@ -2526,7 +2808,7 @@ Navigation tools appear according to installed language plugins. PHP file struct
 
 ### ide_type_hierarchy
 
-Retrieves the complete type hierarchy for a class or interface.
+Retrieves a type hierarchy for a class or interface as bounded, deterministic breadth-first pages.
 
 **Use when:**
 - Exploring class inheritance chains
@@ -2538,14 +2820,20 @@ Retrieves the complete type hierarchy for a class or interface.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | No* | Exact type handle returned by a semantic result. |
 | `file` | string | No* | Path to the file relative to project root |
 | `line` | integer | No* | 1-based line number |
 | `column` | integer | No* | 1-based column number |
 | `className` | string | No* | Fully qualified class name (alternative to position) |
+| `language` | string | No* | Language for a qualified semantic target; must have an installed symbol-reference handler |
+| `symbol` | string | No* | Fully qualified symbol reference used with `language` |
+| `maxNodes` | integer | No | Maximum nodes returned and expanded on this page (default: 100, max: 500) |
+| `cursor` | string | No | Opaque continuation from a previous page. When present, target/search options are ignored; `maxNodes` may set the next page size |
 | `scope` | string | No | Built-in search scope. One of `project_files` (default), `project_and_libraries`, `project_production_files`, `project_test_files` |
 | `includeGenerated` | boolean | No | Include supertypes/subtypes in generated sources (KSP/Dagger/annotation-processor output). Default: true — keeps generated types in the hierarchy |
 
-*Either `file`/`line`/`column` OR `className` must be provided.
+*Provide exactly one nested `target` variant, or one legacy target: `symbolId`,
+`file`/`line`/`column`, `language`/`symbol`, or `className`.
 
 **Rust note:** `className` is not supported for Rust — use `file` + `line` + `column` instead.
 
@@ -2599,6 +2887,7 @@ Retrieves the complete type hierarchy for a class or interface.
 ```json
 {
   "element": {
+    "symbolId": "sym_user-service-impl",
     "name": "com.example.UserServiceImpl",
     "file": "src/main/java/com/example/UserServiceImpl.java",
     "kind": "CLASS",
@@ -2606,12 +2895,14 @@ Retrieves the complete type hierarchy for a class or interface.
   },
   "supertypes": [
     {
+      "symbolId": "sym_user-service",
       "name": "com.example.UserService",
       "file": "src/main/java/com/example/UserService.java",
       "kind": "INTERFACE",
       "language": "Java"
     },
     {
+      "symbolId": "sym_base-service",
       "name": "com.example.BaseService",
       "file": "src/main/java/com/example/BaseService.java",
       "kind": "ABSTRACT_CLASS",
@@ -2620,14 +2911,71 @@ Retrieves the complete type hierarchy for a class or interface.
   ],
   "subtypes": [
     {
+      "symbolId": "sym_admin-user-service-impl",
       "name": "com.example.AdminUserServiceImpl",
       "file": "src/main/java/com/example/AdminUserServiceImpl.java",
       "kind": "CLASS",
       "language": "Java"
     }
-  ]
+  ],
+  "traversal": [
+    {
+      "direction": "supertype",
+      "element": {
+        "symbolId": "sym_user-service",
+        "name": "com.example.UserService",
+        "file": "src/main/java/com/example/UserService.java",
+        "kind": "INTERFACE",
+        "language": "Java"
+      }
+    },
+    {
+      "direction": "supertype",
+      "element": {
+        "symbolId": "sym_base-service",
+        "name": "com.example.BaseService",
+        "file": "src/main/java/com/example/BaseService.java",
+        "kind": "ABSTRACT_CLASS",
+        "language": "Java"
+      }
+    },
+    {
+      "direction": "subtype",
+      "element": {
+        "symbolId": "sym_admin-user-service-impl",
+        "name": "com.example.AdminUserServiceImpl",
+        "file": "src/main/java/com/example/AdminUserServiceImpl.java",
+        "kind": "CLASS",
+        "language": "Java"
+      }
+    }
+  ],
+  "returnedNodes": 3,
+  "truncated": false,
+  "elapsedMs": 14,
+  "hasMore": false,
+  "cursor": null
 }
 ```
+
+`returnedNodes` counts hierarchy nodes in this page, equals `traversal.size`, and excludes the
+repeated root `element`. `truncated` mirrors `hasMore`; when true, pass `cursor` to the same tool to
+continue. `traversal` is the exact combined breadth-first wire order, with each entry identifying
+the `supertype` or `subtype` direction. The legacy `supertypes` and `subtypes` arrays remain as
+direction-filtered views for backward compatibility; concatenating them cannot reconstruct an
+interleaved combined order. All three lists are flat page slices rather than a fully materialized
+nested graph. `maxNodes` bounds both returned nodes and expansion work during traversal.
+
+Hierarchy cursors store the remaining PSI frontier as smart pointers and are scoped to the exact
+project and MCP session. The independent cache keeps at most 128 snapshots and ten per traversal,
+expires entries after ten minutes without access, and enforces aggregate pointer/text budgets.
+Eviction prefers old replay snapshots to the latest frontier; replay retention is bounded, not
+guaranteed for an entire traversal. Repeating a live cursor with the same page size and PSI version
+reuses its retained successor cursor. Returned handles are rebound on each page independently of
+cursor TTL, so symbol-cache eviction cannot leave stale IDs in an otherwise valid page.
+An expired, evicted, wrong-project, wrong-tool, or invalidated cursor must
+restart the query without `cursor`. The Streamable HTTP transport is stateless between requests and
+does not reliably deliver live progress; page metadata is the progress contract.
 
 **Kind Values:**
 - `CLASS` - Concrete class
@@ -2649,19 +2997,22 @@ Analyzes method call relationships to find callers or callees.
 - Analyzing impact of method changes
 - Debugging to understand how a method is reached
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Exact callable handle. Omit coordinates and name selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
 | `language` | string | Conditional | Language of the symbol (e.g., `"Java"`). Required for symbol-based lookup. |
 | `symbol` | string | Conditional | Fully qualified symbol reference. Required for symbol-based lookup. |
 | `direction` | string | Yes | `"callers"` or `"callees"` |
-| `depth` | integer | No | How deep to traverse (default: 3, max: 5) |
+| `depth` | integer | No | How deep to traverse across all pages (default: 3, max: 5) |
+| `maxNodes` | integer | No | Maximum nodes returned and expanded on this page (default: 20 on a fresh call, 100 on continuation; max: 500) |
+| `cursor` | string | No | Opaque continuation from a previous page. When present, target/search options are ignored; `maxNodes` may set the next page size |
 | `scope` | string | No | Built-in search scope. One of `project_files` (default), `project_and_libraries`, `project_production_files`, `project_test_files` |
 | `includeGenerated` | boolean | No | Include callers/callees in generated sources (KSP/Dagger/annotation-processor output). Default: true |
 
@@ -2704,6 +3055,7 @@ Analyzes method call relationships to find callers or callees.
 ```json
 {
   "element": {
+    "symbolId": "sym_validate-user",
     "name": "UserService.validateUser(String)",
     "file": "src/main/java/com/example/UserService.java",
     "line": 20,
@@ -2712,6 +3064,7 @@ Analyzes method call relationships to find callers or callees.
   },
   "calls": [
     {
+      "symbolId": "sym_create-user",
       "name": "UserController.createUser(UserRequest)",
       "file": "src/main/java/com/example/UserController.java",
       "line": 45,
@@ -2719,15 +3072,27 @@ Analyzes method call relationships to find callers or callees.
       "language": "Java"
     },
     {
+      "symbolId": "sym_update-user",
       "name": "UserController.updateUser(String, UserRequest)",
       "file": "src/main/java/com/example/UserController.java",
       "line": 62,
       "column": 17,
       "language": "Java"
     }
-  ]
+  ],
+  "returnedNodes": 2,
+  "truncated": true,
+  "elapsedMs": 22,
+  "hasMore": true,
+  "cursor": "hier_opaque-continuation"
 }
 ```
+
+`calls` is a flat deterministic breadth-first page; `returnedNodes` excludes the repeated root
+`element`. `truncated` mirrors `hasMore`. Continue with the returned `cursor` until `hasMore` is
+false. `maxNodes` is enforced during traversal, so the server never gathers an unbounded call graph
+and trims it afterwards. Cursor scope, TTL/LRU, invalidation, and the no-live-progress transport
+contract are the same as for [`ide_type_hierarchy`](#ide_type_hierarchy).
 
 ---
 
@@ -2742,12 +3107,13 @@ Finds all concrete implementations of an interface, abstract class, or abstract 
 - Finding classes that extend an abstract class
 - Finding all overriding methods for polymorphic behavior analysis
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Exact type/method handle. Omit coordinates and name selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -2796,6 +3162,7 @@ Finds all concrete implementations of an interface, abstract class, or abstract 
 {
   "implementations": [
     {
+      "symbolId": "sym-jpa-user-repository",
       "name": "com.example.JpaUserRepository",
       "file": "src/main/java/com/example/JpaUserRepository.java",
       "line": 12,
@@ -2803,6 +3170,7 @@ Finds all concrete implementations of an interface, abstract class, or abstract 
       "kind": "CLASS"
     },
     {
+      "symbolId": "sym-in-memory-user-repository",
       "name": "com.example.InMemoryUserRepository",
       "file": "src/main/java/com/example/InMemoryUserRepository.java",
       "line": 8,
@@ -2836,12 +3204,13 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
 
 **Position flexibility:** The position (line/column) can be anywhere within the method - on the name, inside the body, or on the @Override annotation. The tool automatically finds the enclosing method.
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Exact method handle. Omit coordinates and name selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number (any line within the method). Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number (any position within the method). Required for position-based lookup. |
@@ -2884,6 +3253,7 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
 ```json
 {
   "method": {
+    "symbolId": "sym-find-user-impl",
     "name": "findUser",
     "signature": "findUser(String id): User",
     "containingClass": "com.example.UserServiceImpl",
@@ -2893,6 +3263,7 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
   },
   "hierarchy": [
     {
+      "symbolId": "sym-find-user-base",
       "name": "findUser",
       "signature": "findUser(String id): User",
       "containingClass": "com.example.AbstractUserService",
@@ -2904,6 +3275,7 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
       "depth": 1
     },
     {
+      "symbolId": "sym-find-user-interface",
       "name": "findUser",
       "signature": "findUser(String id): User",
       "containingClass": "com.example.UserService",
@@ -2972,11 +3344,49 @@ PHP support requires the PHP plugin and is available in PhpStorm or IntelliJ IDE
 {
   "file": "src/main/kotlin/com/example/UserService.kt",
   "language": "Kotlin",
-  "structure": "interface UserService (lines 15-18)\n  fun findUser(id: String): User (line 16)\n  fun deleteUser(id: String) (line 17)\n\nclass UserServiceImpl (lines 20-42)\n  val repository: UserRepository (line 21)\n  override fun findUser(id: String): User (lines 23-29)\n  override fun deleteUser(id: String) (lines 30-35)\n  private fun validate(id: String) (lines 37-41)"
+  "structure": "interface UserService (lines 15-18)\n  fun findUser(id: String): User (line 16)\n  fun deleteUser(id: String) (line 17)\n\nclass UserServiceImpl (lines 20-42)\n  val repository: UserRepository (line 21)\n  override fun findUser(id: String): User (lines 23-29)\n  override fun deleteUser(id: String) (lines 30-35)\n  private fun validate(id: String) (lines 37-41)",
+  "nodes": [
+    {
+      "name": "UserService",
+      "kind": "INTERFACE",
+      "modifiers": ["public"],
+      "signature": "interface UserService",
+      "line": 15,
+      "endLine": 18,
+      "symbolId": "sym_user-service",
+      "children": [
+        {
+          "name": "findUser",
+          "kind": "METHOD",
+          "modifiers": [],
+          "signature": "fun findUser(id: String): User",
+          "line": 16,
+          "endLine": 16,
+          "symbolId": "sym_find-user",
+          "children": []
+        }
+      ]
+    }
+  ]
 }
 ```
 
-**Note:** Each element in the structure output includes both start and end line numbers (e.g., `(lines 42-65)` for multi-line elements, `(line 42)` for single-line elements), making it easy to identify the full extent of each declaration.
+**Compatibility:** `structure` remains the original human-readable tree. `nodes` is an additive
+structured representation of the same hierarchy. Every node has `name`, `kind`, `signature`
+(nullable), `modifiers`, 1-based `line`, nullable `endLine`, `children`, and nullable `symbolId`.
+The ID is created from the exact PSI element while the structure is extracted; it is not recovered
+later from a line number.
+
+All nodes remain present even for large outlines. Only the first 500 eligible nodes in preorder
+receive handles in one response, preventing an outline from evicting its own early IDs.
+`symbolIdsTruncated` reports whether this budget was hit; `symbolIdsOmitted` counts eligible nodes
+left without a handle. Use a targeted semantic query for a node without an ID. The ordinary
+session/TTL/LRU rules still apply to returned handles.
+
+Each element in `structure` still includes both start and end line numbers (for example,
+`(lines 42-65)` for multi-line elements and `(line 42)` for single-line elements). Kotlin nodes use
+semantic kinds (`INTERFACE`, `CLASS`, `ENUM`, `ANNOTATION`, `OBJECT`) instead of inferring the kind
+from the common `KtClass` implementation type.
 
 ---
 
@@ -3134,13 +3544,32 @@ Safely deletes an element, first checking for usages.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file |
+| `target` | object | Conditional | Structured symbol selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | Conditional | Exact symbol handle. Use only with `target_type: "symbol"` and omit coordinates. |
+| `file` | string | Conditional | Path to the file. Required for position-based symbol deletion and file deletion. |
+| `language` | string | Conditional | Legacy qualified-name selector language; requires `symbol` and is mutually exclusive with other target selectors. |
+| `symbol` | string | Conditional | Legacy qualified symbol name; requires `language` and is mutually exclusive with other target selectors. |
 | `target_type` | string | No | What to delete: `"symbol"` (default) or `"file"` (deletes the entire file if no symbol has external usages) |
 | `line` | integer | Conditional | 1-based line number. Required when `target_type` is `"symbol"` (the default) |
 | `column` | integer | Conditional | 1-based column number. Required when `target_type` is `"symbol"` (the default) |
 | `force` | boolean | No | Force deletion even if usages exist (default: false) |
+| `dryRun` | boolean | No | Resolve the target and discover usages/blockers without deleting or saving anything (default: `false`) |
 
 **Example Request:**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_safe_delete",
+    "arguments": {
+      "symbolId": "sym_opaque-handle"
+    }
+  }
+}
+```
+
+**Example Request (position-based):**
 
 ```json
 {
@@ -3155,6 +3584,28 @@ Safely deletes an element, first checking for usages.
   }
 }
 ```
+
+**Example Request (preview):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_safe_delete",
+    "arguments": {
+      "target": { "symbolId": "sym_opaque-handle" },
+      "dryRun": true
+    }
+  }
+}
+```
+
+The common preview response is described in [Refactoring Preview Contract](#refactoring-preview-contract).
+For safe delete, `plannedChange` contains `operation: "safeDelete"`, `targetType`, `name`, and
+`force`. External usages contribute to both `usageCount` and `conflictCount`; `canApply` is false
+when usages exist and `force` is false, discovery was incomplete, or the target is not writable.
+Preview never invokes deletion, saves documents, or registers undo, and it does not invalidate the
+target's `symbolId`.
 
 **Example Request (delete an entire file):**
 
@@ -3176,7 +3627,8 @@ Safely deletes an element, first checking for usages.
 ```json
 {
   "success": true,
-  "message": "Successfully deleted 'LegacyHelper'"
+  "message": "Successfully deleted 'LegacyHelper'",
+  "invalidatedSymbolId": "sym_opaque-handle"
 }
 ```
 
@@ -3203,6 +3655,10 @@ Safely deletes an element, first checking for usages.
 ### Tool-Level Errors
 
 Tool failures (file not found, symbol not found, IDE indexing, refactoring conflicts, etc.) are reported as a normal `tools/call` result with `isError: true` and a human-readable message in `content`, per the MCP specification — never as JSON-RPC errors with custom codes.
+
+An invalid semantic handle is reported with the stable message prefix `SYMBOL_ID_EXPIRED`.
+Rediscover the symbol and retry with its new `symbolId`; do not reuse saved coordinates as a
+fallback because they may now identify a different declaration.
 
 ### Example Error Response
 

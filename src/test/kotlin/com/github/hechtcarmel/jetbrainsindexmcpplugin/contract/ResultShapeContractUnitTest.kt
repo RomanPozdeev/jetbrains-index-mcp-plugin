@@ -9,6 +9,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.CallHierarchy
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.DefinitionResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.DiagnosticsResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileCoverageInfo
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileDiagnosticsAnalysis
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileMatch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileStructureResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FindClassResult
@@ -51,6 +52,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TestSummary
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TextMatch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TypeElement
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TypeHierarchyResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TypeHierarchyTraversalNode
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.UsageLocation
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ChangeSignatureTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ConversionStatus
@@ -64,6 +66,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.MemberEr
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.NoSymbolFoundResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.PositionInfo
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ReplaceTextInFileTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.RefactoringPreviewResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.SafeDeleteBlockedResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.SafeDeleteFileBlockedResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.StructuralSearchReplaceTool
@@ -379,7 +382,8 @@ class ResultShapeContractUnitTest : TestCase() {
             line = 42,
             column = 17,
             containerName = "Service",
-            language = "JAVA"
+            language = "JAVA",
+            symbolId = "sym_match"
         )
         val buildMessage = BuildMessage(
             category = "ERROR",
@@ -403,6 +407,15 @@ class ResultShapeContractUnitTest : TestCase() {
             state = "timed_out",
             reason = "File analysis timed out."
         )
+        val fileDiagnosticsAnalysis = FileDiagnosticsAnalysis(
+            file = "src/main/java/com/example/Service.java",
+            mode = "closed_batch",
+            fresh = true,
+            timedOut = true,
+            message = "Analysis completed using the shared deadline.",
+            problemCount = 1,
+            problemsTruncated = true
+        )
         val testResultInfo = TestResultInfo(
             name = "testHandle",
             suite = "com.example.ServiceTest",
@@ -425,15 +438,21 @@ class ResultShapeContractUnitTest : TestCase() {
             file = "src/main/java/com/example/Service.java",
             kind = "class",
             language = "JAVA",
+            symbolId = "sym_type",
             supertypes = listOf(
                 TypeElement(
                     name = "AbstractService",
                     file = "src/main/java/com/example/AbstractService.java",
                     kind = "class",
                     language = "JAVA",
+                    symbolId = "sym_supertype",
                     supertypes = null
                 )
             )
+        )
+        val typeHierarchyTraversalNode = TypeHierarchyTraversalNode(
+            direction = "supertype",
+            element = typeElement
         )
         val callElement = CallElement(
             name = "handle",
@@ -441,6 +460,7 @@ class ResultShapeContractUnitTest : TestCase() {
             line = 42,
             column = 17,
             language = "JAVA",
+            symbolId = "sym_call",
             children = listOf(
                 CallElement(
                     name = "validate",
@@ -448,6 +468,7 @@ class ResultShapeContractUnitTest : TestCase() {
                     line = 51,
                     column = 9,
                     language = "JAVA",
+                    symbolId = "sym_child_call",
                     children = null
                 )
             )
@@ -458,7 +479,9 @@ class ResultShapeContractUnitTest : TestCase() {
             line = 12,
             column = 14,
             kind = "class",
-            language = "JAVA"
+            language = "JAVA",
+            qualifiedName = "com.example.DefaultService",
+            symbolId = "sym_implementation"
         )
         val methodInfo = MethodInfo(
             name = "handle",
@@ -467,6 +490,18 @@ class ResultShapeContractUnitTest : TestCase() {
             file = "src/main/java/com/example/Service.java",
             line = 42,
             column = 17,
+            language = "JAVA",
+            symbolId = "sym_method"
+        )
+        val updatedSymbol = ResolvedSymbolInfo(
+            symbolId = "sym_updated",
+            name = "process",
+            kind = "method",
+            container = "com.example.Service",
+            file = "src/main/java/com/example/Service.java",
+            line = 43,
+            column = 17,
+            qualifiedName = "com.example.Service#process",
             language = "JAVA"
         )
         val usageInfo = UsageInfo(
@@ -497,9 +532,11 @@ class ResultShapeContractUnitTest : TestCase() {
                     signature = "handle(Request): Response",
                     line = 42,
                     endLine = 55,
-                    children = listOf()
+                    children = listOf(),
+                    symbolId = "sym_structure_method"
                 )
-            )
+            ),
+            symbolId = "sym_structure_class"
         )
         val ssrMatch = StructuralSearchReplaceTool.SsrMatch(
             file = "src/main/java/com/example/Service.java",
@@ -537,6 +574,7 @@ class ResultShapeContractUnitTest : TestCase() {
                     pageSize = 25,
                     stale = true,
                     resolvedSymbol = ResolvedSymbolInfo(
+                        symbolId = "sym_resolved",
                         name = "handle",
                         kind = "method",
                         container = "com.example.Service",
@@ -546,9 +584,11 @@ class ResultShapeContractUnitTest : TestCase() {
                     totalIsExact = false
                 )
             ),
+            struct(ResolvedSymbolInfo.serializer(), updatedSymbol),
             struct(
                 DefinitionResult.serializer(),
                 DefinitionResult(
+                    symbolId = "sym_definition",
                     file = "src/main/java/com/example/Service.java",
                     line = 42,
                     column = 17,
@@ -564,6 +604,7 @@ class ResultShapeContractUnitTest : TestCase() {
             struct(
                 SymbolInfoResult.serializer(),
                 SymbolInfoResult(
+                    symbolId = "sym_info",
                     name = "handle",
                     kind = "method",
                     qualifiedName = "com.example.Service#handle",
@@ -601,13 +642,31 @@ class ResultShapeContractUnitTest : TestCase() {
                 TypeHierarchyResult(
                     element = typeElement,
                     supertypes = listOf(typeElement),
-                    subtypes = listOf(typeElement)
+                    subtypes = listOf(typeElement),
+                    traversal = listOf(
+                        typeHierarchyTraversalNode,
+                        typeHierarchyTraversalNode.copy(direction = "subtype")
+                    ),
+                    returnedNodes = 2,
+                    truncated = true,
+                    elapsedMs = 37L,
+                    hasMore = true,
+                    cursor = "hier_type_page_2"
                 )
             ),
+            struct(TypeHierarchyTraversalNode.serializer(), typeHierarchyTraversalNode),
             struct(TypeElement.serializer(), typeElement),
             struct(
                 CallHierarchyResult.serializer(),
-                CallHierarchyResult(element = callElement, calls = listOf(callElement))
+                CallHierarchyResult(
+                    element = callElement,
+                    calls = listOf(callElement),
+                    returnedNodes = 1,
+                    truncated = true,
+                    elapsedMs = 29L,
+                    hasMore = true,
+                    cursor = "hier_call_page_2"
+                )
             ),
             struct(CallElement.serializer(), callElement),
             struct(
@@ -630,11 +689,13 @@ class ResultShapeContractUnitTest : TestCase() {
                     problems = listOf(problemInfo),
                     intentions = listOf(intentionInfo),
                     problemCount = 1,
+                    problemsTruncated = true,
                     intentionCount = 1,
                     analysisFresh = true,
                     analysisTimedOut = true,
                     analysisMessage = "analysis finished",
                     analysisMode = "closed_batch",
+                    fileAnalyses = listOf(fileDiagnosticsAnalysis),
                     buildErrors = listOf(buildMessage),
                     buildErrorCount = 1,
                     buildWarningCount = 2,
@@ -645,6 +706,7 @@ class ResultShapeContractUnitTest : TestCase() {
                     testResultsTruncated = true
                 )
             ),
+            struct(FileDiagnosticsAnalysis.serializer(), fileDiagnosticsAnalysis),
             struct(ProblemInfo.serializer(), problemInfo),
             struct(IntentionInfo.serializer(), intentionInfo),
             struct(TestResultInfo.serializer(), testResultInfo),
@@ -694,7 +756,25 @@ class ResultShapeContractUnitTest : TestCase() {
                     changesCount = 3,
                     message = "Renamed 'handle' to 'process'",
                     warnings = listOf("1 usage in a comment was not updated"),
-                    unretargetedImporters = listOf("src/main/java/com/example/Caller.java")
+                    unretargetedImporters = listOf("src/main/java/com/example/Caller.java"),
+                    updatedSymbol = updatedSymbol,
+                    invalidatedSymbolId = "sym_invalidated"
+                )
+            ),
+            struct(
+                RefactoringPreviewResult.serializer(),
+                RefactoringPreviewResult(
+                    dryRun = true,
+                    canApply = true,
+                    target = updatedSymbol,
+                    plannedChange = JsonObject(
+                        mapOf("newName" to JsonPrimitive("process"))
+                    ),
+                    affectedFiles = listOf("src/main/java/com/example/Service.java"),
+                    usageCount = 3,
+                    conflictCount = 1,
+                    warnings = listOf("1 usage in a comment would not be updated"),
+                    elapsedMs = 31L
                 )
             ),
             struct(
@@ -706,7 +786,10 @@ class ResultShapeContractUnitTest : TestCase() {
                 SyncFilesResult(
                     syncedPaths = listOf("/Users/dev/project/src"),
                     syncedAll = true,
-                    message = "Synced 1 path"
+                    message = "Synced 1 path",
+                    requestedPaths = listOf("src/main/java/com/example/Removed.java"),
+                    refreshedRoots = listOf("src/main/java/com/example"),
+                    deletedPaths = listOf("src/main/java/com/example/Removed.java")
                 )
             ),
             struct(BuildMessage.serializer(), buildMessage),
@@ -773,7 +856,8 @@ class ResultShapeContractUnitTest : TestCase() {
                             column = 21,
                             isInterface = true,
                             depth = 2,
-                            language = "JAVA"
+                            language = "JAVA",
+                            symbolId = "sym_super_method_nested"
                         )
                     ),
                     totalCount = 1
@@ -792,7 +876,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     column = 21,
                     isInterface = true,
                     depth = 2,
-                    language = "JAVA"
+                    language = "JAVA",
+                    symbolId = "sym_super_method"
                 )
             ),
             struct(
@@ -982,7 +1067,10 @@ class ResultShapeContractUnitTest : TestCase() {
                 FileStructureResult(
                     file = "src/main/java/com/example/Service.java",
                     language = "JAVA",
-                    structure = "Service\n  handle(Request): Response"
+                    structure = "Service\n  handle(Request): Response",
+                    nodes = listOf(structureNode),
+                    symbolIdsTruncated = true,
+                    symbolIdsOmitted = 1
                 )
             ),
             struct(
@@ -993,7 +1081,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     elementType = "method",
                     usageCount = 2,
                     blockingUsages = listOf(usageInfo),
-                    message = "2 usages block deletion"
+                    message = "2 usages block deletion",
+                    symbolId = "sym_safe_delete"
                 )
             ),
             struct(UsageInfo.serializer(), usageInfo),
@@ -1038,7 +1127,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     file = "src/main/java/com/example/Service.java",
                     message = "Replaced 'handle'",
                     startLine = 42,
-                    endLine = 55
+                    endLine = 55,
+                    updatedSymbol = updatedSymbol
                 )
             ),
             struct(
@@ -1077,7 +1167,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     file = "src/main/java/com/example/Service.java",
                     message = "Signature changed",
                     affectedFiles = listOf("src/main/java/com/example/Caller.java"),
-                    changesCount = 2
+                    changesCount = 2,
+                    updatedSymbol = updatedSymbol
                 )
             ),
             struct(

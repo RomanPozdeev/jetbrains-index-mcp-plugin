@@ -3,7 +3,6 @@ package com.github.hechtcarmel.jetbrainsindexmcpplugin.server.transport
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.McpConstants
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
-import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
@@ -40,8 +39,9 @@ internal val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1")
 
 private val PORT_SUFFIX = Regex(":\\d{1,5}")
 
-private val PREFLIGHT_METHODS = listOf(HttpMethod.Get, HttpMethod.Post, HttpMethod.Delete, HttpMethod.Options)
-    .joinToString(", ") { it.value }
+private const val GET_METHOD = "GET"
+private const val OPTIONS_METHOD = "OPTIONS"
+private const val PREFLIGHT_METHODS = "GET, POST, DELETE, OPTIONS"
 
 private val PREFLIGHT_HEADERS = listOf(
     HttpHeaders.ContentType,
@@ -115,7 +115,7 @@ internal fun Application.installMcpOriginGuard(
 
         val origin = context.request.headers[HttpHeaders.Origin]
 
-        if (context.request.httpMethod == HttpMethod.Options) {
+        if (context.request.httpMethod.value == OPTIONS_METHOD) {
             if (origin == null || !isLoopbackOrigin(origin)) {
                 context.respondText("Origin not allowed", status = HttpStatusCode.Forbidden)
             } else {
@@ -151,7 +151,7 @@ private fun ApplicationCall.reflectOrigin(origin: String) {
 }
 
 private suspend fun ApplicationCall.rejectForbidden(message: String) {
-    if (request.httpMethod == HttpMethod.Get) {
+    if (request.httpMethod.value == GET_METHOD) {
         respondText(message, status = HttpStatusCode.Forbidden)
     } else {
         respondText(
