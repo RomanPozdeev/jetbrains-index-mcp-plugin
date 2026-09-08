@@ -68,13 +68,14 @@ description:
   
   Rust note: "callers" direction works well; "callees" direction may have limited results due to Rust plugin PSI resolution constraints.
   
-  Returns: recursive tree with method signatures, file locations (line/column), and nested call relationships.
+  Returns deterministic breadth-first pages with method signatures, file locations, symbolId handles, and pagination metadata. Live progress is not available on stateless HTTP; continue with cursor.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
-  Parameters: direction (required): "callers" or "callees". depth (optional, default: 3, max: 5). scope (optional, default: "project_files"; supported: project_files, project_and_libraries, project_production_files, project_test_files).
+  Parameters: direction (required for a fresh query): "callers" or "callees". depth (optional, default: 3, max: 5), maxNodes (optional, default: 100, max: 500), cursor (continuation page), scope (optional).
   
   Example: {"file": "src/Service.java", "line": 42, "column": 10, "direction": "callers"}
   Example: {"language": "Java", "symbol": "com.example.Service#processRequest(String)", "direction": "callers", "scope": "project_and_libraries"}
@@ -89,6 +90,11 @@ schema:
         "description": "1-based column number",
         "type": "integer"
       },
+      "cursor":
+      {
+        "description": "Opaque session/project-bound continuation from the previous hierarchy page. Other search parameters are ignored.",
+        "type": "string"
+      },
       "depth":
       {
         "description": "How many levels deep to traverse the call hierarchy (default: 3, max: 5)",
@@ -96,7 +102,7 @@ schema:
       },
       "direction":
       {
-        "description": "Direction: 'callers' (methods that call this method) or 'callees' (methods this method calls)",
+        "description": "Direction for a fresh query: 'callers' or 'callees'. Omit when cursor is provided.",
         "enum":
         [
           "callers",
@@ -131,6 +137,11 @@ schema:
         "description": "1-based line number",
         "type": "integer"
       },
+      "maxNodes":
+      {
+        "description": "Maximum hierarchy nodes returned and expanded in this page. Default: 100, max: 500.",
+        "type": "integer"
+      },
       "project_path":
       {
         "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
@@ -152,12 +163,64 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
-    "required":
-    [
-      "direction"
-    ],
     "type": "object"
   }
 
@@ -169,6 +232,7 @@ description:
   New parameters get a default value inserted at all call sites.
   
   Examples:
+  - By handle: {"symbolId": "<opaque-id>", "newName": "renamed"}
   - Add parameter: {"file": "src/Service.java", "line": 15, "column": 10, "newParameters": [{"oldIndex": 0, "name": "id", "type": "String"}, {"oldIndex": -1, "name": "validate", "type": "boolean", "defaultValue": "true"}]}
   - Change return type: {"file": "src/Service.java", "line": 15, "column": 10, "newReturnType": "Optional<User>"}
 schema:
@@ -180,15 +244,32 @@ schema:
         "description": "1-based column number",
         "type": "integer"
       },
+      "dryRun":
+      {
+        "description": "Resolve and validate the method, then discover usages/conflicts without modifying files. Default: false.",
+        "type": "boolean"
+      },
       "file":
       {
-        "description": "Path to file containing the method. REQUIRED.",
+        "description": "Path to file containing the method. Required with line+column; omit when symbolId is used.",
         "type": "string"
       },
       "generateDelegate":
       {
         "description": "Generate a delegation method with the old signature. Default: false.",
         "type": "boolean"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
+        "type": "string"
       },
       "line":
       {
@@ -223,14 +304,69 @@ schema:
       {
         "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
         "type": "string"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
-    "required":
-    [
-      "file",
-      "line",
-      "column"
-    ],
     "type": "object"
   }
 
@@ -366,15 +502,15 @@ schema:
 description:
   Get code diagnostics from multiple sources: file analysis (errors, warnings, intentions), build output (compiler errors/warnings from last build), and test results (from open test run tabs).
   
-  Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. The analysisMode field reports which provider produced the file problems: "open_daemon" (file open in an editor) or "closed_batch" (public batch analysis); null when no analysis ran.
+  Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. Single-file calls report legacy top-level analysis metadata. Multi-file calls return one aggregate problems list plus fileAnalyses entries with mode, freshness, timeout, and message metadata for each file.
   
-  At least one source must be active: provide 'file' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine all three.
+  At least one source must be active: provide exactly one of 'file' or 'files' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine file analysis with build and test results. A multi-file call accepts at most 100 supplied paths, all sharing one analysis timeout budget; lexical aliases are analyzed only once.
   
   File analysis uses fresh daemon highlights for files that are already open in an editor. Closed files use public batch analysis, so weak warnings and quick-fix intentions may be less complete unless the file is open. The analyzed file is re-read from disk first, so results reflect edits made outside the IDE without calling ide_sync_files. For diagnostics across many files or the whole project with per-file coverage metadata, use ide_project_diagnostics.
   
-  Parameters: file (optional, enables code analysis), line + column (optional, for intentions, requires file), startLine/endLine (optional, requires file), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
+  Parameters: file or files (mutually exclusive, enable code analysis), line + column (optional, for intentions, single file only), startLine/endLine (optional, single file only), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
   
-  Example: {"file": "src/MyClass.java"} or {"includeBuildErrors": true, "severity": "errors"} or {"file": "src/MyClass.java", "includeBuildErrors": true, "includeTestResults": true}
+  Example: {"file": "src/MyClass.java"} or {"files": ["src/A.java", "src/B.java"]} or {"includeBuildErrors": true, "severity": "errors"}
 schema:
   {
     "properties":
@@ -393,6 +529,18 @@ schema:
       {
         "description": "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). Optional — enables per-file code analysis.",
         "type": "string"
+      },
+      "files":
+      {
+        "description": "Project-relative file paths to analyze under one shared timeout budget (max 100). Mutually exclusive with 'file'.",
+        "items":
+        {
+          "type": "string"
+        },
+        "maxItems": 100,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": true
       },
       "includeBuildErrors":
       {
@@ -469,6 +617,7 @@ description:
   Auto-reformats the changed range by default.
   
   Examples:
+  - {"symbolId": "<opaque-id>", "content": "public void renamed() {}"}
   - {"file": "src/Main.java", "class": "Main", "member": "process", "content": "public void process(String input, boolean validate) {\n    if (validate) check(input);\n}"}
   - {"file": "src/Config.kt", "class": "Config", "member": "timeout", "content": "val timeout: Duration = Duration.ofSeconds(30)"}
   - {"file": "src/Service.java", "member": "Service", "content": "public class Service<T> implements Serializable { ... }"}
@@ -488,7 +637,19 @@ schema:
       },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required with member selectors; omit when symbolId is used.",
+        "type": "string"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
         "type": "string"
       },
       "line":
@@ -498,7 +659,7 @@ schema:
       },
       "member":
       {
-        "description": "Name of the method, function, field, or property to replace entirely.",
+        "description": "Name of the method, function, field, or property to replace entirely. Required unless symbolId is used.",
         "type": "string"
       },
       "parameterCount":
@@ -515,12 +676,71 @@ schema:
       {
         "description": "Auto-reformat the changed range and optimize imports. Default: true.",
         "type": "boolean"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "required":
     [
-      "file",
-      "member",
       "content"
     ],
     "type": "object"
@@ -556,7 +776,8 @@ description:
   
   Supports: Java, Kotlin, Python, JavaScript, TypeScript, PHP, Markdown
   
-  Returns: Formatted tree string with element types, modifiers, signatures, and line numbers.
+  Returns: The legacy formatted tree string plus structured nodes with element types,
+  modifiers, signatures, source ranges, children, and optional symbolId handles.
   
   Parameters: file (required) - Path relative to project root
   
@@ -668,6 +889,7 @@ description:
   Returns: file path, line/column of definition, code preview, and symbol name.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -725,6 +947,62 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -803,6 +1081,7 @@ description:
   Supports pagination: first call returns results + nextCursor. Pass cursor to get the next page.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call (necessary for fresh search, ignored when cursor is provided)
   - file + line + column: position-based lookup (necessary for fresh search, ignored when cursor is provided)
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript; necessary for fresh search, ignored when cursor is provided)
   - cursor: pagination cursor from a previous response
@@ -880,6 +1159,62 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -894,6 +1229,7 @@ description:
   Supports pagination: first call returns results + nextCursor. Pass cursor to get the next page.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call (necessary for fresh search, ignored when cursor is provided)
   - file + line + column: position-based lookup (necessary for fresh search, ignored when cursor is provided)
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript; necessary for fresh search, ignored when cursor is provided)
   - cursor: pagination cursor from a previous response
@@ -987,6 +1323,62 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -1003,6 +1395,7 @@ description:
   Returns: full hierarchy chain from immediate parent (depth=1) to root, with file locations (line/column) and containing class info.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup (position can be anywhere within the method body)
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -1050,6 +1443,62 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -1781,7 +2230,7 @@ description:
   Rename a symbol or file and update all references across the project. Use instead of find-and-replace for safe, semantic renaming that handles all usages correctly. Supports undo (Ctrl+Z).
   
   Two modes:
-  - **Symbol rename** (`targetType="symbol"`, file + line + column + newName): Rename a symbol at a specific position. `line` and `column` are 1-based and must be provided.
+  - **Symbol rename** (`targetType="symbol"`, symbolId + newName OR file + line + column + newName): Rename an exact saved symbol. `symbolId` is mutually exclusive with coordinates.
   - **File rename** (`targetType="file"`, file + newName): Rename the file itself. Any placeholder `line`/`column` values are ignored for mode selection. Works for all file types including binary files (images, etc.). Especially useful for Android resource files (.webp, .png, .xml in res/) where it updates all resource references across the project.
   
   Backward compatibility: if `targetType` is omitted, null/null line+column still means file rename; provided line+column still means symbol rename.
@@ -1801,7 +2250,7 @@ description:
   
   Returns: affected files list and change count. Modifies source files.
   
-  Parameters: file + newName (required). targetType is optional; line + column are only needed for symbol rename. overrideStrategy + relatedRenamingStrategy (optional).
+  Parameters: newName (required), plus symbolId or file target coordinates. targetType is optional; line + column are only needed for position-based symbol rename. overrideStrategy + relatedRenamingStrategy (optional).
   
   Examples:
   - Symbol rename: {"file": "src/UserService.java", "targetType": "symbol", "line": 15, "column": 18, "newName": "CustomerService"}
@@ -1815,9 +2264,26 @@ schema:
         "description": "1-based column number. Required for symbol rename; omit for file rename unless `targetType=file`.",
         "type": "integer"
       },
+      "dryRun":
+      {
+        "description": "Resolve and validate the target, then discover usages/conflicts without modifying files. Default: false.",
+        "type": "boolean"
+      },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required for file rename or position-based symbol rename; omit when symbolId is used.",
+        "type": "string"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
         "type": "string"
       },
       "line":
@@ -1858,6 +2324,67 @@ schema:
         ],
         "type": "string"
       },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "targetType":
       {
         "description": "What to rename: 'symbol' (requires 1-based line+column) or 'file' (renames the file itself and ignores placeholder line/column values). If omitted, legacy behavior applies.",
@@ -1871,7 +2398,6 @@ schema:
     },
     "required":
     [
-      "file",
       "newName"
     ],
     "type": "object"
@@ -1882,7 +2408,7 @@ description:
   Delete a symbol or file safely by first checking for usages. Use when removing code to avoid breaking references.
   
   Modes:
-  - target_type='symbol' (default): Delete the symbol at line/column (REQUIRED: file, line, column).
+  - target_type='symbol' (default): Delete the exact symbol selected by symbolId, or by file + line/column.
     If position is whitespace/comment, returns nearby symbol suggestions.
   - target_type='file': Delete the entire file (REQUIRED: file only).
     Only succeeds if no symbols have external usages. Internal call chains don't block deletion.
@@ -1893,6 +2419,7 @@ description:
   Returns: success status and affected files, OR blocking usages list, OR nearby symbol suggestions.
   
   Examples:
+  - Symbol ID: {"symbolId": "<opaque-id>"}
   - Symbol: {"file": "src/OldClass.java", "line": 10, "column": 14}
   - Symbol with force: {"file": "src/OldClass.java", "line": 10, "column": 14, "force": true}
   - File: {"file": "src/UnusedUtils.java", "target_type": "file"}
@@ -1905,9 +2432,14 @@ schema:
         "description": "1-based column number. REQUIRED when target_type='symbol' (default).",
         "type": "integer"
       },
+      "dryRun":
+      {
+        "description": "Resolve the target and check usages without deleting anything. Default: false.",
+        "type": "boolean"
+      },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required for file deletion or position-based symbol deletion; omit when symbolId is used.",
         "type": "string"
       },
       "force":
@@ -1915,6 +2447,18 @@ schema:
         "default": false,
         "description": "Force deletion even if usages exist. Default: false. Use with caution!",
         "type": "boolean"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
+        "type": "string"
       },
       "line":
       {
@@ -1925,6 +2469,67 @@ schema:
       {
         "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
         "type": "string"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       },
       "target_type":
       {
@@ -1938,10 +2543,6 @@ schema:
         "type": "string"
       }
     },
-    "required":
-    [
-      "file"
-    ],
     "type": "object"
   }
 
@@ -2101,10 +2702,11 @@ description:
   For fields/properties: replaces the initializer expression (after =).
   Auto-reformats the changed range by default.
   
-  Requires: file (always), member (always). class is optional for top-level members (Kotlin).
+  Target with symbolId, or with file + member. class is optional for top-level members (Kotlin).
   For overloaded methods, use parameterCount or line to disambiguate.
   
   Examples:
+  - {"symbolId": "<opaque-id>", "content": "return 42;"}
   - {"file": "src/Main.java", "class": "Main", "member": "getName", "content": "return this.name;"}
   - {"file": "src/Config.kt", "member": "defaultPort", "content": "8080"}
 schema:
@@ -2123,7 +2725,19 @@ schema:
       },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required with member selectors; omit when symbolId is used.",
+        "type": "string"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
         "type": "string"
       },
       "line":
@@ -2133,7 +2747,7 @@ schema:
       },
       "member":
       {
-        "description": "Name of the method, function, field, or property to replace the body/initializer of.",
+        "description": "Name of the method, function, field, or property to replace the body/initializer of. Required unless symbolId is used.",
         "type": "string"
       },
       "parameterCount":
@@ -2150,12 +2764,71 @@ schema:
       {
         "description": "Auto-reformat the changed range and optimize imports. Default: true.",
         "type": "boolean"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "required":
     [
-      "file",
-      "member",
       "content"
     ],
     "type": "object"
@@ -2680,6 +3353,7 @@ description:
   Prefer this over ide_find_definition + reading the file when you only need the signature or the docs.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup, so overloads are addressable
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -2736,6 +3410,62 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -2753,7 +3483,7 @@ schema:
     {
       "paths":
       {
-        "description": "File or directory paths relative to project root to sync. If omitted, syncs the entire project.",
+        "description": "File or directory paths relative to the selected project/content root. Absolute paths, traversal, and symlink escapes are rejected. Deleted paths refresh their nearest existing parent. If omitted, syncs the entire selected root.",
         "items":
         {
           "type": "string"
@@ -2777,9 +3507,9 @@ description:
   
   Rust note: className parameter not supported for Rust; use file + line + column instead.
   
-  Returns: target class info, full supertype chain (recursive), and all subtypes in the project.
+  Returns deterministic breadth-first pages containing target class info, supertypes, subtypes, symbolId handles, and pagination metadata. Live progress is not available on stateless HTTP; continue with cursor.
   
-  Parameters: Either className (e.g., "com.example.MyClass" for Java/PHP-style FQNs or "MyComponent" for JavaScript/TypeScript symbols) OR file + line + column. scope (optional, default: "project_files"; supported: project_files, project_and_libraries, project_production_files, project_test_files).
+  Parameters for a fresh query: either symbolId, className (e.g., "com.example.MyClass" for Java/PHP-style FQNs or "MyComponent" for JavaScript/TypeScript symbols), OR file + line + column. maxNodes (optional, default: 100, max: 500), scope (optional, default: "project_files"; supported: project_files, project_and_libraries, project_production_files, project_test_files). For the next page, pass cursor; other search parameters are ignored.
   
   Example: {"className": "com.example.UserService", "scope": "project_and_libraries"} or {"file": "src/MyClass.java", "line": 10, "column": 14}
 schema:
@@ -2796,6 +3526,11 @@ schema:
         "description": "1-based column number. Required if using file parameter.",
         "type": "integer"
       },
+      "cursor":
+      {
+        "description": "Opaque session/project-bound continuation from the previous hierarchy page. Other search parameters are ignored.",
+        "type": "string"
+      },
       "file":
       {
         "description": "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). Use with line and column.",
@@ -2806,9 +3541,26 @@ schema:
         "description": "Include supertypes/subtypes defined in generated sources (KSP/Dagger/annotation-processor output). Default: true — keep generated types in the hierarchy.",
         "type": "boolean"
       },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
+        "type": "string"
+      },
       "line":
       {
         "description": "1-based line number where the class is defined. Required if using file parameter.",
+        "type": "integer"
+      },
+      "maxNodes":
+      {
+        "description": "Maximum hierarchy nodes returned and expanded in this page. Default: 100, max: 500.",
         "type": "integer"
       },
       "project_path":
@@ -2827,6 +3579,67 @@ schema:
           "project_test_files"
         ],
         "type": "string"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Opaque, non-canonical symbol handle returned by a semantic tool. Reuse this exact handle across line shifts and rename. It is bounded by the current MCP server session, exact project instance, inactivity TTL, and LRU eviction. The same PSI symbol may have multiple simultaneously valid handles, so never compare symbolId values for symbol equality.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Structured target selector. Choose exactly one variant: symbolId, position, or qualifiedName with language. Mutually exclusive with legacy top-level symbolId/file/line/column/language/symbol selectors and with className where that legacy selector is supported.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Opaque, session/project/TTL/LRU-bound handle. Multiple unequal handles may identify the same PSI symbol; do not compare IDs for equality.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"

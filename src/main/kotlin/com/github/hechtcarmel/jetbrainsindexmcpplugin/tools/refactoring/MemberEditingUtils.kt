@@ -1,6 +1,7 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.*
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
@@ -19,7 +20,8 @@ data class MemberEditResult(
     val file: String,
     val message: String,
     val startLine: Int? = null,
-    val endLine: Int? = null
+    val endLine: Int? = null,
+    val updatedSymbol: ResolvedSymbolInfo? = null
 )
 
 @Serializable

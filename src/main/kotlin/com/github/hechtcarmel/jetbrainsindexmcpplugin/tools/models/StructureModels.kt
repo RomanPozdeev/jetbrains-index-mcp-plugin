@@ -1,6 +1,8 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models
 
+import com.intellij.psi.PsiElement
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 /**
  * Represents a single node in the file structure tree.
@@ -10,7 +12,9 @@ import kotlinx.serialization.Serializable
  * @property modifiers List of modifiers (public, private, static, etc.)
  * @property signature Optional signature information (method parameters, return type, etc.)
  * @property line The line number where this element is defined
+ * @property endLine The final source line covered by this element, when known
  * @property children Child elements (e.g., methods within a class)
+ * @property symbolId Opaque session handle for the exact PSI declaration, when one exists
  */
 @Serializable
 data class StructureNode(
@@ -20,7 +24,9 @@ data class StructureNode(
     val signature: String?,
     val line: Int,
     val endLine: Int? = null,
-    val children: List<StructureNode> = emptyList()
+    val children: List<StructureNode> = emptyList(),
+    val symbolId: String? = null,
+    @Transient internal val pointerTarget: PsiElement? = null
 )
 
 /**
@@ -50,10 +56,12 @@ enum class StructureKind {
  * @property file The file path relative to project root
  * @property language The language ID (e.g., "JAVA", "Python", "kotlin")
  * @property structure The formatted tree string
+ * @property nodes The same hierarchy as structured data, including optional symbol handles
  */
 @Serializable
 data class FileStructureResult(
     val file: String,
     val language: String,
-    val structure: String
+    val structure: String,
+    val nodes: List<StructureNode> = emptyList()
 )

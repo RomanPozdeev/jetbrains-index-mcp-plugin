@@ -4,6 +4,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRe
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileStructureResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.StructureNode
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.TreeFormatter
@@ -30,7 +31,8 @@ class FileStructureTool : AbstractMcpTool() {
 
         Supports: Java, Kotlin, Python, JavaScript, TypeScript, PHP, Markdown
 
-        Returns: Formatted tree string with element types, modifiers, signatures, and line numbers.
+        Returns: The legacy formatted tree string plus structured nodes with element types,
+        modifiers, signatures, source ranges, children, and optional symbolId handles.
 
         Parameters: file (required) - Path relative to project root
 
@@ -61,22 +63,37 @@ class FileStructureTool : AbstractMcpTool() {
             // Extract structure
             val nodes = handler.getFileStructure(psiFile, project)
 
-            if (nodes.isEmpty()) {
-                return@suspendingReadAction createSuccessResult(
-                    "File is empty or has no parseable structure.\n\n" +
+            // Preserve the previous human-readable payload even when no nodes were found.
+            val treeString = if (nodes.isEmpty()) {
+                "File is empty or has no parseable structure.\n\n" +
                     "File: ${psiFile.name}\n" +
                     "Language: ${psiFile.language.id}"
-                )
+            } else {
+                TreeFormatter.format(nodes, psiFile.name, psiFile.language.id)
             }
-
-            // Format as tree
-            val treeString = TreeFormatter.format(nodes, psiFile.name, psiFile.language.id)
+            val structuredNodes = bindStructureNodes(project, nodes)
 
             createJsonResult(FileStructureResult(
                 file = file,
                 language = psiFile.language.id,
-                structure = treeString
+                structure = treeString,
+                nodes = structuredNodes
             ))
         }
     }
+
+    /**
+     * Attaches handles while the exact PSI elements produced by the language handler are still
+     * available. Re-resolving a node later by line would be ambiguous for overloads and nested
+     * declarations that share a line.
+     */
+    private fun bindStructureNodes(project: Project, nodes: List<StructureNode>): List<StructureNode> =
+        nodes.map { node ->
+            node.copy(
+                children = bindStructureNodes(project, node.children),
+                symbolId = node.pointerTarget
+                    ?.takeIf { it.isValid }
+                    ?.let { bindSymbolId(project, it) }
+            )
+        }
 }

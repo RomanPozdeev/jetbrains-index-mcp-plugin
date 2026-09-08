@@ -48,6 +48,11 @@ class McpServerService(
     private val toolRegistry: ToolRegistry = ToolRegistry()
     private val serverFactory: McpServerFactory
     private val legacySseTransports: LegacySseTransports = LegacySseTransports()
+    private val symbolIdRegistry: SymbolIdRegistry = SymbolIdRegistry.getInstance()
+    private val paginationService: PaginationService =
+        ApplicationManager.getApplication().getService(PaginationService::class.java)
+    private val hierarchyContinuationRegistry: HierarchyContinuationRegistry =
+        HierarchyContinuationRegistry.getInstance()
 
     // Written under the instance monitor (startServer/stopServer), read lock-free from
     // status accessors on arbitrary threads — hence @Volatile.
@@ -231,6 +236,9 @@ class McpServerService(
     fun stopServer() {
         ktorServer?.stop()
         ktorServer = null
+        symbolIdRegistry.resetSession()
+        paginationService.resetSession()
+        hierarchyContinuationRegistry.resetSession()
     }
 
     /**

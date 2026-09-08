@@ -24,6 +24,7 @@ object ParamNames {
     const val TARGET_DIRECTORY = "targetDirectory"
     const val REPLACE_ALL = "replaceAll"
     const val FORCE = "force"
+    const val DRY_RUN = "dryRun"
     const val TARGET_TYPE_CAMEL = "targetType"
     const val TARGET_TYPE = "target_type"
     const val OPTIMIZE_IMPORTS = "optimizeImports"
@@ -43,6 +44,7 @@ object ParamNames {
 
     // Symbol reference parameter
     const val SYMBOL = "symbol"
+    const val SYMBOL_ID = "symbolId"
 
     // Symbol search parameters
     const val QUERY = "query"

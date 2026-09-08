@@ -1,13 +1,19 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
+import com.intellij.openapi.project.Project
 import junit.framework.TestCase
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
+import java.lang.reflect.Proxy
+import java.util.concurrent.atomic.AtomicLong
 
 class PaginationServiceUnitTest : TestCase() {
 
@@ -112,6 +118,33 @@ class PaginationServiceUnitTest : TestCase() {
         val newToken = service.createCursor("tool", emptyList(), emptySet(), null, 0L, "/path")
         assertNotNull(newToken)
         assertTrue(newToken.isNotEmpty())
+        assertEquals(PaginationService.MAX_CURSORS, service.sizeForTesting())
+        runBlocking {
+            val oldest = service.getPage(tokens.first(), 1, "/path", 0L)
+            assertTrue("the least-recently-used cursor must be evicted", oldest is PaginationService.GetPageResult.Error)
+            assertEquals(
+                PaginationService.CursorError.NOT_FOUND,
+                (oldest as PaginationService.GetPageResult.Error).reason
+            )
+            assertTrue(service.getPage(newToken, 1, "/path", 0L) is PaginationService.GetPageResult.Success)
+        }
+    }
+
+    fun testConcurrentCreationKeepsStrictCursorCap() = runBlocking {
+        val service = createTestService()
+        val tokens = coroutineScope {
+            (1..(PaginationService.MAX_CURSORS * 4)).map {
+                async(Dispatchers.Default) {
+                    service.createCursor("tool", emptyList(), emptySet(), null, 0L, "/path")
+                }
+            }.awaitAll()
+        }
+
+        assertEquals(PaginationService.MAX_CURSORS, service.sizeForTesting())
+        val liveCount = tokens.count {
+            service.getPage(it, 1, "/path", 0L) is PaginationService.GetPageResult.Success
+        }
+        assertEquals(PaginationService.MAX_CURSORS, liveCount)
     }
 
     // --- getPage core logic ---
@@ -157,6 +190,49 @@ class PaginationServiceUnitTest : TestCase() {
         assertEquals(PaginationService.CursorError.MALFORMED, (result as PaginationService.GetPageResult.Error).reason)
     }
 
+    fun testRejectsNegativeOffsetAndInvalidEmbeddedPageSizes() = runBlocking {
+        val service = createTestService()
+        val token = service.createCursor("tool", emptyList(), emptySet(), null, 42L, "/project")
+        val entryId = service.decodeCursor(token)!!.entryId
+
+        val negativeOffset = service.getPage(service.encodeCursor(entryId, -1), 10, "/project", 42L)
+        val zeroPageSize = service.getPage(service.encodeCursor(entryId, 0, 0), null, "/project", 42L)
+        val oversizedPageSize = service.getPage(
+            service.encodeCursor(entryId, 0, PaginationService.MAX_PAGE_SIZE + 1),
+            null,
+            "/project",
+            42L
+        )
+
+        listOf(negativeOffset, zeroPageSize, oversizedPageSize).forEach { result ->
+            assertTrue(result is PaginationService.GetPageResult.Error)
+            assertEquals(
+                PaginationService.CursorError.MALFORMED,
+                (result as PaginationService.GetPageResult.Error).reason
+            )
+        }
+    }
+
+    fun testRejectsInvalidRequestedPageSizeAndAvoidsOffsetOverflow() = runBlocking {
+        val service = createTestService()
+        val token = service.createCursor("tool", emptyList(), emptySet(), null, 42L, "/project")
+        val entryId = service.decodeCursor(token)!!.entryId
+
+        val zero = service.getPage(token, 0, "/project", 42L)
+        val oversized = service.getPage(token, PaginationService.MAX_PAGE_SIZE + 1, "/project", 42L)
+        assertEquals(PaginationService.CursorError.MALFORMED, (zero as PaginationService.GetPageResult.Error).reason)
+        assertEquals(PaginationService.CursorError.MALFORMED, (oversized as PaginationService.GetPageResult.Error).reason)
+
+        val overflowAttempt = service.getPage(
+            service.encodeCursor(entryId, Int.MAX_VALUE),
+            PaginationService.MAX_PAGE_SIZE,
+            "/project",
+            42L
+        ) as PaginationService.GetPageResult.Success
+        assertTrue(overflowAttempt.page.items.isEmpty())
+        assertEquals(Int.MAX_VALUE, overflowAttempt.page.offset)
+    }
+
     /**
      * Contract: PaginationService.getPage() rejects malformed non-empty cursors with MALFORMED error.
      * Blank cursors ("", whitespace) are NOT normalized here — that is a tool-layer responsibility.
@@ -177,6 +253,56 @@ class PaginationServiceUnitTest : TestCase() {
         val result = service.getPage(token, 10, "/project-b", 42L)
         assertTrue(result is PaginationService.GetPageResult.Error)
         assertEquals(PaginationService.CursorError.WRONG_PROJECT, (result as PaginationService.GetPageResult.Error).reason)
+    }
+
+    fun testProductionCursorBelongsToExactProjectInstanceNotOnlyItsPath() = runBlocking {
+        val service = createTestService()
+        val owner = projectProxy("/same/project")
+        val reopenedAtSamePath = projectProxy("/same/project")
+        val token = service.createCursor(
+            toolName = "tool",
+            results = emptyList(),
+            seenKeys = emptySet(),
+            searchExtender = null,
+            psiModCount = 42L,
+            project = owner
+        )
+
+        assertTrue(service.getPage(token, 10, owner, 42L) is PaginationService.GetPageResult.Success)
+        val wrongInstance = service.getPage(token, 10, reopenedAtSamePath, 42L)
+        assertTrue(wrongInstance is PaginationService.GetPageResult.Error)
+        assertEquals(
+            PaginationService.CursorError.WRONG_PROJECT,
+            (wrongInstance as PaginationService.GetPageResult.Error).reason
+        )
+    }
+
+    fun testProductionCursorCannotBeReadThroughLegacyPathOverload() = runBlocking {
+        val service = createTestService()
+        val owner = projectProxy("/same/project")
+        val token = service.createCursor("tool", emptyList(), emptySet(), null, 42L, owner)
+
+        val result = service.getPage(token, 10, "/same/project", 42L)
+
+        assertTrue(result is PaginationService.GetPageResult.Error)
+        assertEquals(
+            PaginationService.CursorError.WRONG_PROJECT,
+            (result as PaginationService.GetPageResult.Error).reason
+        )
+    }
+
+    fun testProductionCursorIsBoundToOriginatingTool() = runBlocking {
+        val service = createTestService()
+        val owner = projectProxy("/same/project")
+        val token = service.createCursor("origin-tool", emptyList(), emptySet(), null, 42L, owner)
+
+        val result = service.getPage(token, 10, owner, 42L, expectedToolName = "other-tool")
+
+        assertTrue(result is PaginationService.GetPageResult.Error)
+        assertEquals(
+            PaginationService.CursorError.WRONG_TOOL,
+            (result as PaginationService.GetPageResult.Error).reason
+        )
     }
 
     fun testGetPageStaleDetection() = runBlocking {
@@ -248,7 +374,123 @@ class PaginationServiceUnitTest : TestCase() {
         val cursor = service.encodeCursor(service.decodeCursor(token)!!.entryId, lastOffset)
         val result = service.getPage(cursor, 100, "/project", 42L) as PaginationService.GetPageResult.Success
         assertFalse(extenderCalled)
-        assertFalse(result.page.hasMore)
+        assertTrue("the hard cache cap must not be reported as source exhaustion", result.page.hasMore)
+        assertNull("a capped cache cannot offer an unusable continuation", result.page.nextCursor)
+    }
+
+    fun testInitialResultsAreCappedWithoutClaimingExhaustion() = runBlocking {
+        val service = createTestService()
+        val max = PaginationService.MAX_CACHED_RESULTS_PER_CURSOR
+        val results = (1..(max + 25)).map {
+            PaginationService.SerializedResult("key$it", JsonPrimitive("data$it"))
+        }
+        val token = service.createCursor("tool", results, results.map { it.key }.toSet(), null, 42L, "/project")
+        val entryId = service.decodeCursor(token)!!.entryId
+        val lastPage = service.getPage(
+            service.encodeCursor(entryId, max - 1),
+            PaginationService.MAX_PAGE_SIZE,
+            "/project",
+            42L
+        ) as PaginationService.GetPageResult.Success
+
+        assertEquals(max, lastPage.page.totalCollected)
+        assertEquals(listOf(JsonPrimitive("data$max")), lastPage.page.items)
+        assertTrue(lastPage.page.hasMore)
+        assertNull(lastPage.page.nextCursor)
+    }
+
+    fun testExtensionIsDeduplicatedAndCapped() = runBlocking {
+        val service = createTestService()
+        val max = PaginationService.MAX_CACHED_RESULTS_PER_CURSOR
+        val initial = (1 until max).map {
+            PaginationService.SerializedResult("key$it", JsonPrimitive("data$it"))
+        }
+        val extender: suspend (Set<String>, Int) -> List<PaginationService.SerializedResult> = { _, _ ->
+            listOf(
+                PaginationService.SerializedResult("key${max - 1}", JsonPrimitive("duplicate-initial")),
+                PaginationService.SerializedResult("new-a", JsonPrimitive("new-a")),
+                PaginationService.SerializedResult("new-a", JsonPrimitive("duplicate-extension")),
+                PaginationService.SerializedResult("new-b", JsonPrimitive("overflow"))
+            )
+        }
+        val token = service.createCursor("tool", initial, initial.map { it.key }.toSet(), extender, 42L, "/project")
+        val entryId = service.decodeCursor(token)!!.entryId
+        val lastPage = service.getPage(
+            service.encodeCursor(entryId, max - 2),
+            2,
+            "/project",
+            42L
+        ) as PaginationService.GetPageResult.Success
+
+        assertEquals(max, lastPage.page.totalCollected)
+        assertEquals(
+            listOf(JsonPrimitive("data${max - 1}"), JsonPrimitive("new-a")),
+            lastPage.page.items
+        )
+        assertTrue(lastPage.page.hasMore)
+        assertNull(lastPage.page.nextCursor)
+    }
+
+    fun testStaleCursorNeverInvokesExtender() = runBlocking {
+        val service = createTestService()
+        var extenderCalled = false
+        val token = service.createCursor(
+            "tool",
+            listOf(PaginationService.SerializedResult("key", JsonPrimitive("data"))),
+            setOf("key"),
+            { _, _ ->
+                extenderCalled = true
+                emptyList()
+            },
+            42L,
+            "/project"
+        )
+
+        val result = service.getPage(token, 1, "/project", 43L)
+
+        assertFalse(extenderCalled)
+        assertEquals(
+            PaginationService.CursorError.SEARCH_INVALIDATED,
+            (result as PaginationService.GetPageResult.Error).reason
+        )
+    }
+
+    fun testModCountChangeDuringExtenderFailsClosedBeforeAppend() = runBlocking {
+        val service = createTestService()
+        val modCount = AtomicLong(42L)
+        val extenderEntered = CompletableDeferred<Unit>()
+        val releaseExtender = CompletableDeferred<Unit>()
+        val token = service.createCursor(
+            "tool",
+            listOf(PaginationService.SerializedResult("key1", JsonPrimitive("data1"))),
+            setOf("key1"),
+            { _, _ ->
+                extenderEntered.complete(Unit)
+                releaseExtender.await()
+                listOf(PaginationService.SerializedResult("key2", JsonPrimitive("data2")))
+            },
+            42L,
+            "/project"
+        )
+
+        val request = async {
+            service.getPage(
+                token,
+                1,
+                "/project",
+                42L,
+                currentModCountAfterSuspension = modCount::get
+            )
+        }
+        extenderEntered.await()
+        modCount.set(43L)
+        releaseExtender.complete(Unit)
+
+        val result = request.await()
+        assertEquals(
+            PaginationService.CursorError.SEARCH_INVALIDATED,
+            (result as PaginationService.GetPageResult.Error).reason
+        )
     }
 
     fun testExtenderFailureReturnsSearchInvalidated() = runBlocking {
@@ -386,6 +628,91 @@ class PaginationServiceUnitTest : TestCase() {
         assertEquals(PaginationService.CursorError.NOT_FOUND, (result as PaginationService.GetPageResult.Error).reason)
     }
 
+    fun testResetSessionClearsAllEntries() = runBlocking {
+        val service = createTestService()
+        val token = service.createCursor("tool", emptyList(), emptySet(), null, 0L, "/project")
+        service.resetSession()
+        val result = service.getPage(token, 10, "/project", 0L)
+        assertTrue(result is PaginationService.GetPageResult.Error)
+        assertEquals(PaginationService.CursorError.NOT_FOUND, (result as PaginationService.GetPageResult.Error).reason)
+    }
+
+    fun testOldGenerationCannotCreateCursorAfterReset() = runBlocking {
+        val service = createTestService()
+        val oldContext = service.generationContext()
+        val releaseRequest = CompletableDeferred<Unit>()
+        val request = async {
+            withContext(oldContext) {
+                releaseRequest.await()
+                runCatching {
+                    service.createCursor("tool", emptyList(), emptySet(), null, 0L, "/project")
+                }
+            }
+        }
+
+        service.resetSession()
+        releaseRequest.complete(Unit)
+
+        assertTrue(request.await().isFailure)
+        assertEquals(0, service.sizeForTesting())
+    }
+
+    fun testOldGenerationCannotLookUpCursorAfterReset() = runBlocking {
+        val service = createTestService()
+        val token = service.createCursor("tool", emptyList(), emptySet(), null, 0L, "/project")
+        val oldContext = service.generationContext()
+        val releaseRequest = CompletableDeferred<Unit>()
+        val request = async {
+            withContext(oldContext) {
+                releaseRequest.await()
+                service.getPage(token, 1, "/project", 0L)
+            }
+        }
+
+        service.resetSession()
+        releaseRequest.complete(Unit)
+
+        val result = request.await()
+        assertEquals(
+            PaginationService.CursorError.SEARCH_INVALIDATED,
+            (result as PaginationService.GetPageResult.Error).reason
+        )
+    }
+
+    fun testResetDuringExtenderPreventsOldPageReturn() = runBlocking {
+        val service = createTestService()
+        val extenderEntered = CompletableDeferred<Unit>()
+        val releaseExtender = CompletableDeferred<Unit>()
+        val token = service.createCursor(
+            "tool",
+            listOf(PaginationService.SerializedResult("key1", JsonPrimitive("data1"))),
+            setOf("key1"),
+            { _, _ ->
+                extenderEntered.complete(Unit)
+                releaseExtender.await()
+                listOf(PaginationService.SerializedResult("key2", JsonPrimitive("data2")))
+            },
+            42L,
+            "/project"
+        )
+        val oldContext = service.generationContext()
+        val request = async {
+            withContext(oldContext) {
+                service.getPage(token, 1, "/project", 42L)
+            }
+        }
+
+        extenderEntered.await()
+        service.resetSession()
+        releaseExtender.complete(Unit)
+
+        val result = request.await()
+        assertEquals(
+            PaginationService.CursorError.SEARCH_INVALIDATED,
+            (result as PaginationService.GetPageResult.Error).reason
+        )
+    }
+
     // --- Metadata round-trip ---
 
     fun testMetadataRoundTrip() = runBlocking {
@@ -401,5 +728,27 @@ class PaginationServiceUnitTest : TestCase() {
 
     private fun createTestService(): PaginationService {
         return PaginationService(CoroutineScope(Dispatchers.Default))
+    }
+
+    private fun projectProxy(basePath: String): Project {
+        return Proxy.newProxyInstance(
+            Project::class.java.classLoader,
+            arrayOf(Project::class.java)
+        ) { proxy, method, args ->
+            when (method.name) {
+                "getBasePath" -> basePath
+                "isDisposed" -> false
+                "getName" -> "pagination-test"
+                "equals" -> proxy === args?.firstOrNull()
+                "hashCode" -> System.identityHashCode(proxy)
+                "toString" -> "PaginationProjectProxy($basePath)"
+                else -> when (method.returnType) {
+                    java.lang.Boolean.TYPE -> false
+                    java.lang.Integer.TYPE -> 0
+                    java.lang.Long.TYPE -> 0L
+                    else -> null
+                }
+            }
+        } as Project
     }
 }

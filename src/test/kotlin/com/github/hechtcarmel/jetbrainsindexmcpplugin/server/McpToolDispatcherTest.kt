@@ -6,10 +6,21 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.mcp.McpToolDispatch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.isFailure
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.text
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.McpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.ToolRegistry
+import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.project.Project
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 /**
  * Covers the seam between "a client asked for tool X" and the tool running: the enabled/disabled
@@ -78,5 +89,99 @@ class McpToolDispatcherTest : BasePlatformTestCase() {
             "${ToolNames.INDEX_STATUS} should be advertised when enabled",
             advertised.contains(ToolNames.INDEX_STATUS)
         )
+    }
+
+    fun testNestedSymbolIdIsUsedForProjectRoutingBeforeToolExecution() = runBlocking {
+        var generated = 0
+        val registry = SymbolIdRegistry(idGenerator = { "nested-route-${++generated}" })
+        val psiFile = myFixture.addFileToProject("src/NestedRoute.java", "class NestedRoute {}")
+        val symbolId = ReadAction.compute<String, Throwable> { registry.bind(project, psiFile) }
+        val routedDispatcher = McpToolDispatcher(
+            toolRegistry = toolRegistry,
+            recordHistory = { _, _ -> },
+            updateHistory = { _, _, _, _, _ -> },
+            symbolIdRegistryProvider = { registry }
+        )
+
+        val success = routedDispatcher.call(ToolNames.INDEX_STATUS, buildJsonObject {
+            putJsonObject("target") { put("symbolId", symbolId) }
+        })
+        assertFalse("valid nested handle should route to its owning project", success.isFailure)
+
+        val expired = routedDispatcher.call(ToolNames.INDEX_STATUS, buildJsonObject {
+            putJsonObject("target") { put("symbolId", "missing-handle") }
+        })
+        assertTrue("unknown nested handle must fail routing even with one project open", expired.isFailure)
+        assertTrue(expired.text.contains("SYMBOL_ID_EXPIRED"))
+        registry.dispose()
+    }
+
+    fun testPaginationCursorIgnoresTargetSelectorsForRouting() = runBlocking {
+        val registry = SymbolIdRegistry(idGenerator = { "unused" })
+        val cursorDispatcher = McpToolDispatcher(
+            toolRegistry = toolRegistry,
+            recordHistory = { _, _ -> },
+            updateHistory = { _, _, _, _, _ -> },
+            symbolIdRegistryProvider = { registry }
+        )
+
+        val result = cursorDispatcher.call(ToolNames.INDEX_STATUS, buildJsonObject {
+            put("cursor", "next-page")
+            put("symbolId", "missing-handle")
+            putJsonObject("target") { put("symbolId", "also-missing") }
+        })
+
+        assertFalse("a valid cursor must bypass target-based routing", result.isFailure)
+        registry.dispose()
+    }
+
+    fun testPaginationGenerationIsCapturedBeforePreExecutionChecks() = runBlocking {
+        val paginationService = PaginationService(CoroutineScope(Dispatchers.Default))
+        val toolName = "ide_test_pagination_generation"
+        val cursorCreatingTool = object : McpTool {
+            override val name: String = toolName
+            override val description: String = "Creates a cursor for dispatcher generation testing"
+            override val inputSchema: ToolSchema = ToolSchema()
+
+            override suspend fun execute(project: Project, arguments: JsonObject): CallToolResult {
+                return runCatching {
+                    paginationService.createCursor(
+                        toolName = name,
+                        results = emptyList(),
+                        seenKeys = emptySet(),
+                        searchExtender = null,
+                        psiModCount = 0L,
+                        project = project
+                    )
+                    CallToolResult(content = listOf(TextContent("unexpected success")))
+                }.getOrElse { error ->
+                    CallToolResult(
+                        content = listOf(TextContent(error.message ?: "session changed")),
+                        isError = true
+                    )
+                }
+            }
+        }
+        var reset = false
+        val generationDispatcher = McpToolDispatcher(
+            toolRegistry = ToolRegistry().apply { register(cursorCreatingTool) },
+            edtUnresponsiveDurationMs = {
+                if (!reset) {
+                    reset = true
+                    paginationService.resetSession()
+                }
+                null
+            },
+            recordHistory = { _, _ -> },
+            updateHistory = { _, _, _, _, _ -> },
+            paginationServiceProvider = { paginationService }
+        )
+
+        val result = generationDispatcher.call(toolName, buildJsonObject { })
+
+        assertTrue("a request from the old generation must fail", result.isFailure)
+        assertTrue(result.text.contains("session changed"))
+        assertEquals(0, paginationService.sizeForTesting())
+        paginationService.dispose()
     }
 }

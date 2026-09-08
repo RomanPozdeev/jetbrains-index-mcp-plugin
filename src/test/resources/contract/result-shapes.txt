@@ -1,6 +1,6 @@
 # MCP tool response shapes — golden snapshot
 # Regenerate: ./gradlew test -Ptier=unit --tests "*ResultShapeContractUnitTest" -Dcontract.update=true
-# shapes: 69
+# shapes: 73
 
 ## ActiveFileInfo
   column: number?
@@ -41,10 +41,16 @@
   language: string? (optional)
   line: number
   name: string
+  symbolId: string? (optional)
 
 ## CallHierarchyResult
   calls: array
+  cursor: string? (optional)
+  elapsedMs: number (optional)
   element: object
+  hasMore: boolean (optional)
+  returnedNodes: number (optional)
+  truncated: boolean (optional)
 
 ## ChangeSignatureTool.ChangeSignatureResult
   affectedFiles: array (optional)
@@ -52,6 +58,7 @@
   file: string
   message: string
   success: boolean
+  updatedSymbol: object? (optional)
 
 ## ConversionStatus (enum)
   CONVERTED -> "CONVERTED"
@@ -75,6 +82,7 @@
   file: string
   line: number
   preview: string
+  symbolId: string
   symbolName: string
 
 ## DiagnosticsResult
@@ -87,6 +95,7 @@
   buildErrorsTruncated: boolean? (optional)
   buildTimestamp: number? (optional)
   buildWarningCount: number? (optional)
+  fileAnalyses: array? (optional)
   intentionCount: number? (optional)
   intentions: array? (optional)
   problemCount: number? (optional)
@@ -108,6 +117,13 @@
   reason: string? (optional)
   state: string
 
+## FileDiagnosticsAnalysis
+  file: string
+  fresh: boolean
+  message: string? (optional)
+  mode: string? (optional)
+  timedOut: boolean
+
 ## FileMatch
   directory: string
   name: string
@@ -116,6 +132,7 @@
 ## FileStructureResult
   file: string
   language: string
+  nodes: array (optional)
   structure: string
 
 ## FindClassResult
@@ -174,6 +191,8 @@
   language: string? (optional)
   line: number
   name: string
+  qualifiedName: string? (optional)
+  symbolId: string? (optional)
 
 ## ImplementationResult
   hasMore: boolean (optional)
@@ -223,6 +242,7 @@
   message: string
   startLine: number? (optional)
   success: boolean
+  updatedSymbol: object? (optional)
 
 ## MemberErrorResult
   candidates: array? (optional)
@@ -238,6 +258,7 @@
   line: number
   name: string
   signature: string
+  symbolId: string? (optional)
 
 ## NoSymbolFoundResult
   error: string
@@ -308,12 +329,25 @@
   lineCount: number
   startLine: number?
 
+## RefactoringPreviewResult
+  affectedFiles: array
+  canApply: boolean
+  conflictCount: number
+  dryRun: boolean (optional)
+  elapsedMs: number
+  plannedChange: object
+  target: object
+  usageCount: number
+  warnings: array
+
 ## RefactoringResult
   affectedFiles: array
   changesCount: number
+  invalidatedSymbolId: string? (optional)
   message: string
   success: boolean
   unretargetedImporters: array? (optional)
+  updatedSymbol: object? (optional)
   warnings: array? (optional)
 
 ## ReplaceTextInFileTool.ReplaceTextResult
@@ -322,6 +356,17 @@
   message: string
   replacements: number
   success: boolean
+
+## ResolvedSymbolInfo
+  column: number? (optional)
+  container: string?
+  file: string?
+  kind: string?
+  language: string? (optional)
+  line: number?
+  name: string?
+  qualifiedName: string? (optional)
+  symbolId: string
 
 ## RunTestsInProgressResult
   configName: string
@@ -349,6 +394,7 @@
   elementName: string
   elementType: string
   message: string
+  symbolId: string? (optional)
   usageCount: number
 
 ## SafeDeleteFileBlockedResult
@@ -414,6 +460,7 @@
   modifiers: array
   name: string
   signature: string?
+  symbolId: string? (optional)
 
 ## SuperMethodInfo
   column: number?
@@ -426,6 +473,7 @@
   line: number?
   name: string
   signature: string
+  symbolId: string? (optional)
 
 ## SuperMethodsResult
   hierarchy: array
@@ -454,6 +502,7 @@
   returnType: string? (optional)
   signature: string
   signatureSource: string
+  symbolId: string
   thrownTypes: array? (optional)
   typeParameters: array? (optional)
   visibility: string? (optional)
@@ -467,6 +516,7 @@
   line: number
   name: string
   qualifiedName: string?
+  symbolId: string
 
 ## SymbolParameterInfo
   name: string?
@@ -480,7 +530,10 @@
   type: string
 
 ## SyncFilesResult
+  deletedPaths: array (optional)
   message: string
+  refreshedRoots: array (optional)
+  requestedPaths: array (optional)
   syncedAll: boolean
   syncedPaths: array
 
@@ -535,11 +588,22 @@
   language: string? (optional)
   name: string
   supertypes: array? (optional)
+  symbolId: string? (optional)
 
 ## TypeHierarchyResult
+  cursor: string? (optional)
+  elapsedMs: number (optional)
   element: object
+  hasMore: boolean (optional)
+  returnedNodes: number (optional)
   subtypes: array
   supertypes: array
+  traversal: array (optional)
+  truncated: boolean (optional)
+
+## TypeHierarchyTraversalNode
+  direction: string
+  element: object
 
 ## UsageInfo
   column: number

@@ -15,6 +15,8 @@ import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.util.Processor
+import com.intellij.util.Query
 
 /**
  * Registration entry point for Python language handlers.
@@ -288,13 +290,27 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
         element: PsiElement,
         project: Project,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        directOnly: Boolean,
+        direction: TypeHierarchyDirection?,
+        page: HierarchyPageRequest?
     ): TypeHierarchyData? {
         val pyClass = findContainingPyClass(element) ?: return null
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
-        val supertypes = getSupertypes(project, pyClass, searchScope = searchScope)
-        val subtypes = getSubtypes(project, pyClass, searchScope)
+        val collectionLimit = page?.collectionLimit ?: 100
+        val rawSupertypes = if (direction != TypeHierarchyDirection.SUBTYPE) {
+            getSupertypes(project, pyClass, searchScope = searchScope, directOnly = directOnly).take(collectionLimit)
+        } else emptyList()
+        val rawSubtypes = if (direction != TypeHierarchyDirection.SUPERTYPE) {
+            getSubtypes(project, pyClass, searchScope, directOnly, collectionLimit)
+        } else emptyList()
+        val (supertypes, superNext) = if (direction == TypeHierarchyDirection.SUPERTYPE) {
+            rawSupertypes.applyHierarchyPage(page)
+        } else rawSupertypes to null
+        val (subtypes, subtypeNext) = if (direction == TypeHierarchyDirection.SUBTYPE) {
+            rawSubtypes.applyHierarchyPage(page)
+        } else rawSubtypes to null
 
         return TypeHierarchyData(
             element = TypeElementData(
@@ -303,10 +319,12 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
                 file = pyClass.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, pyClass),
                 kind = "CLASS",
-                language = "Python"
+                language = "Python",
+                pointerTarget = pyClass
             ),
             supertypes = supertypes,
-            subtypes = subtypes
+            subtypes = subtypes,
+            nextOffset = superNext ?: subtypeNext
         )
     }
 
@@ -315,7 +333,8 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
         pyClass: PsiElement,
         visited: MutableSet<String> = mutableSetOf(),
         depth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false
     ): List<TypeElementData> {
         if (depth > MAX_HIERARCHY_DEPTH) return emptyList()
 
@@ -334,7 +353,8 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
                     superName != "object" &&
                     shouldIncludeNavigationElement(searchScope, superClass)
                 ) {
-                    val superSupertypes = getSupertypes(project, superClass, visited, depth + 1, searchScope)
+                    val superSupertypes = if (directOnly) emptyList() else
+                        getSupertypes(project, superClass, visited, depth + 1, searchScope, directOnly = false)
                     supertypes.add(TypeElementData(
                         name = superName,
                         qualifiedName = getQualifiedName(superClass),
@@ -342,7 +362,8 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
                         line = getLineNumber(project, superClass),
                         kind = "CLASS",
                         language = "Python",
-                        supertypes = superSupertypes.takeIf { it.isNotEmpty() }
+                        supertypes = superSupertypes.takeIf { it.isNotEmpty() },
+                        pointerTarget = superClass
                     ))
                 }
             }
@@ -356,29 +377,36 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
     private fun getSubtypes(
         project: Project,
         pyClass: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false,
+        maxResults: Int = 100
     ): List<TypeElementData> {
+        if (maxResults <= 0) return emptyList()
+
         return try {
             val searchClass = Class.forName("com.jetbrains.python.psi.search.PyClassInheritorsSearch")
             val searchMethod = searchClass.getMethod("search", pyClassClass, java.lang.Boolean.TYPE)
-            val query = searchMethod.invoke(null, pyClass, true)
+            val query = searchMethod.invoke(null, pyClass, !directOnly)
 
-            val findAllMethod = query.javaClass.getMethod("findAll")
-            val inheritors = findAllMethod.invoke(query) as? Collection<*> ?: return emptyList()
-
-            inheritors.filterIsInstance<PsiElement>()
-                .filter { shouldIncludeNavigationElement(searchScope, it) }
-                .take(100)
-                .map { inheritor ->
-                    TypeElementData(
+            @Suppress("UNCHECKED_CAST")
+            val inheritors = query as? Query<Any?> ?: return emptyList()
+            val results = mutableListOf<TypeElementData>()
+            inheritors.forEach(Processor { candidate ->
+                val inheritor = candidate as? PsiElement
+                if (inheritor != null && shouldIncludeNavigationElement(searchScope, inheritor)) {
+                    results.add(TypeElementData(
                         name = getQualifiedName(inheritor) ?: getName(inheritor) ?: "unknown",
                         qualifiedName = getQualifiedName(inheritor),
                         file = inheritor.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                         line = getLineNumber(project, inheritor),
                         kind = "CLASS",
-                        language = "Python"
-                    )
+                        language = "Python",
+                        pointerTarget = inheritor
+                    ))
                 }
+                results.size < maxResults
+            })
+            results
         } catch (e: Exception) {
             emptyList()
         }
@@ -445,7 +473,8 @@ class PythonImplementationsHandler : BasePythonHandler<List<ImplementationData>>
                         line = getLineNumber(project, overridingMethod) ?: 0,
                         column = getColumnNumber(project, overridingMethod) ?: 0,
                         kind = "METHOD",
-                        language = "Python"
+                        language = "Python",
+                        pointerTarget = overridingMethod
                     )
                 }
         } catch (e: Exception) {
@@ -477,7 +506,8 @@ class PythonImplementationsHandler : BasePythonHandler<List<ImplementationData>>
                         line = getLineNumber(project, inheritor) ?: 0,
                         column = getColumnNumber(project, inheritor) ?: 0,
                         kind = "CLASS",
-                        language = "Python"
+                        language = "Python",
+                        pointerTarget = inheritor
                     )
                 }
         } catch (e: Exception) {
@@ -512,21 +542,25 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
         direction: String,
         depth: Int,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        page: HierarchyPageRequest?
     ): CallHierarchyData? {
         val pyFunction = findContainingPyFunction(element) ?: return null
         val visited = mutableSetOf<String>()
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
-        val calls = if (direction == "callers") {
-            findCallersRecursive(project, pyFunction, depth, visited, searchScope = searchScope)
+        val maxResults = page?.collectionLimit ?: MAX_RESULTS_PER_LEVEL
+        val rawCalls = if (direction == "callers") {
+            findCallersRecursive(project, pyFunction, depth, visited, searchScope = searchScope, maxResults = maxResults)
         } else {
-            findCalleesRecursive(project, pyFunction, depth, visited, searchScope = searchScope)
+            findCalleesRecursive(project, pyFunction, depth, visited, searchScope = searchScope, maxResults = maxResults)
         }
+        val (calls, nextOffset) = rawCalls.applyHierarchyPage(page)
 
         return CallHierarchyData(
             element = createCallElement(project, pyFunction),
-            calls = calls
+            calls = calls,
+            nextOffset = nextOffset
         )
     }
 
@@ -572,47 +606,53 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
+        if (maxResults <= 0) return emptyList()
 
         val functionKey = getFunctionKey(pyFunction)
         if (functionKey in visited) return emptyList()
         visited.add(functionKey)
 
         val callers = mutableListOf<CallElementData>()
-        findDirectCallers(pyFunction)
-            .take(MAX_RESULTS_PER_LEVEL * 2)
+        val candidateLimit = (maxResults.toLong() * 2L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        findDirectCallers(pyFunction, candidateLimit)
             .forEach { directCaller ->
-                if (directCaller == pyFunction || callers.size >= MAX_RESULTS_PER_LEVEL) return@forEach
+                if (directCaller == pyFunction || callers.size >= maxResults) return@forEach
 
                 val children = if (depth > 1) {
-                    findCallersRecursive(project, directCaller, depth - 1, visited, stackDepth + 1, searchScope)
+                    findCallersRecursive(
+                        project, directCaller, depth - 1, visited, stackDepth + 1, searchScope, maxResults
+                    )
                 } else null
 
                 if (shouldIncludeNavigationElement(searchScope, directCaller)) {
                     callers.add(createCallElement(project, directCaller, children))
                 } else if (children != null) {
                     children.forEach { child ->
-                        if (callers.size < MAX_RESULTS_PER_LEVEL) {
+                        if (callers.size < maxResults) {
                             callers.add(child)
                         }
                     }
                 }
             }
 
-        return callers.distinctBy { it.name + it.file + it.line }.take(MAX_RESULTS_PER_LEVEL)
+        return callers.distinctBy { it.name + it.file + it.line }.take(maxResults)
     }
 
-    private fun findDirectCallers(pyFunction: PsiElement): List<PsiElement> {
-        return findCallersUsingPyStaticHierarchy(pyFunction)
+    private fun findDirectCallers(pyFunction: PsiElement, maxResults: Int): List<PsiElement> {
+        return findCallersUsingPyStaticHierarchy(pyFunction, maxResults)
     }
 
     /**
      * Mirrors PyCharm's own Python caller hierarchy implementation when the API is available.
      * This uses Python-specific find-usages semantics rather than generic ReferencesSearch.
      */
-    private fun findCallersUsingPyStaticHierarchy(pyFunction: PsiElement): List<PsiElement> {
+    private fun findCallersUsingPyStaticHierarchy(pyFunction: PsiElement, maxResults: Int): List<PsiElement> {
+        if (maxResults <= 0) return emptyList()
+
         return try {
             val pyElementClass = Class.forName("com.jetbrains.python.psi.PyElement")
             val hierarchyUtilClass = Class.forName("com.jetbrains.python.hierarchy.call.PyStaticCallHierarchyUtil")
@@ -629,6 +669,7 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
                 }
                 .filter { it != pyFunction }
                 .distinctBy { getFunctionKey(it) }
+                .take(maxResults)
                 .toList()
         } catch (e: ClassNotFoundException) {
             throw IllegalStateException(
@@ -661,9 +702,11 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
+        if (maxResults <= 0) return emptyList()
 
         val functionKey = getFunctionKey(pyFunction)
         if (functionKey in visited) return emptyList()
@@ -672,28 +715,35 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
         val callees = mutableListOf<CallElementData>()
         try {
             val pyCallExpr = pyCallExpressionClass ?: return emptyList()
-            @Suppress("UNCHECKED_CAST")
-            val callExpressions = PsiTreeUtil.findChildrenOfType(pyFunction, pyCallExpr as Class<out PsiElement>)
-
-            callExpressions.take(MAX_RESULTS_PER_LEVEL).forEach { callExpr ->
-                val calledFunction = resolveCallExpression(callExpr)
-                if (calledFunction != null && isPyFunction(calledFunction)) {
-                    val children = if (depth > 1) {
-                        findCalleesRecursive(project, calledFunction, depth - 1, visited, stackDepth + 1, searchScope)
-                    } else null
-                    if (shouldIncludeNavigationElement(searchScope, calledFunction)) {
-                        val element = createCallElement(project, calledFunction, children)
-                        if (callees.none { it.name == element.name && it.file == element.file }) {
-                            callees.add(element)
+            PsiTreeUtil.processElements(pyFunction) { candidate ->
+                if (pyCallExpr.isInstance(candidate)) {
+                    val calledFunction = resolveCallExpression(candidate)
+                    if (calledFunction != null && isPyFunction(calledFunction)) {
+                        val children = if (depth > 1) {
+                            findCalleesRecursive(
+                                project,
+                                calledFunction,
+                                depth - 1,
+                                visited,
+                                stackDepth + 1,
+                                searchScope,
+                                maxResults
+                            )
+                        } else null
+                        val candidates = if (shouldIncludeNavigationElement(searchScope, calledFunction)) {
+                            listOf(createCallElement(project, calledFunction, children))
+                        } else {
+                            children.orEmpty()
                         }
-                    } else if (children != null) {
-                        children.forEach { child ->
-                            if (callees.none { it.name == child.name && it.file == child.file }) {
-                                callees.add(child)
+                        for (callee in candidates) {
+                            if (callees.size >= maxResults) break
+                            if (callees.none { it.name == callee.name && it.file == callee.file }) {
+                                callees.add(callee)
                             }
                         }
                     }
                 }
+                callees.size < maxResults
             }
         } catch (e: Exception) {
             // Handle gracefully
@@ -736,7 +786,8 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
             line = getLineNumber(project, pyFunction) ?: 0,
             column = getColumnNumber(project, pyFunction) ?: 0,
             language = "Python",
-            children = children?.takeIf { it.isNotEmpty() }
+            children = children?.takeIf { it.isNotEmpty() },
+            pointerTarget = pyFunction
         )
     }
 }
@@ -766,7 +817,8 @@ class PythonSuperMethodsHandler : BasePythonHandler<SuperMethodsData>(), SuperMe
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, pyFunction) ?: 0,
             column = getColumnNumber(project, pyFunction) ?: 0,
-            language = "Python"
+            language = "Python",
+            pointerTarget = pyFunction
         )
 
         val hierarchy = buildHierarchy(project, pyFunction)
@@ -812,7 +864,8 @@ class PythonSuperMethodsHandler : BasePythonHandler<SuperMethodsData>(), SuperMe
                         column = getColumnNumber(project, superMethod),
                         isInterface = false,
                         depth = depth,
-                        language = "Python"
+                        language = "Python",
+                        pointerTarget = superMethod
                     ))
 
                     hierarchy.addAll(buildHierarchy(project, superMethod, visited, depth + 1))
@@ -975,7 +1028,8 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
             signature = buildClassSignature(pyClass),
             line = getLineNumber(project, pyClass) ?: 0,
             endLine = getEndLineNumber(project, pyClass),
-            children = children.sortedBy { it.line }
+            children = children.sortedBy { it.line },
+            pointerTarget = pyClass
         )
     }
 
@@ -988,7 +1042,8 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
             modifiers = getPythonModifiers(pyFunction),
             signature = buildFunctionSignature(pyFunction),
             line = getLineNumber(project, pyFunction) ?: 0,
-            endLine = getEndLineNumber(project, pyFunction)
+            endLine = getEndLineNumber(project, pyFunction),
+            pointerTarget = pyFunction
         )
     }
 

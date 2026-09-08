@@ -21,6 +21,8 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class FindDefinitionTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     companion object {
         private const val DEFAULT_MAX_PREVIEW_LINES = 50
         private const val MAX_ALLOWED_PREVIEW_LINES = 500
@@ -34,6 +36,7 @@ class FindDefinitionTool : AbstractMcpTool() {
         Returns: file path, line/column of definition, code preview, and symbol name.
 
         Target (mutually exclusive):
+        - symbolId: opaque handle returned by a previous semantic call
         - file + line + column: position-based lookup
         - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()})
 
@@ -45,6 +48,8 @@ class FindDefinitionTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
+        .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
         .languageAndSymbol(required = false)
@@ -78,6 +83,11 @@ class FindDefinitionTool : AbstractMcpTool() {
             if (effectiveTarget is PsiDirectory) {
                 val dirPath = getRelativePath(project, effectiveTarget.virtualFile)
                 return@suspendingReadAction createJsonResult(DefinitionResult(
+                    symbolId = bindSymbolId(
+                        project,
+                        effectiveTarget,
+                        optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+                    ),
                     file = dirPath,
                     line = 1,
                     column = 1,
@@ -99,6 +109,11 @@ class FindDefinitionTool : AbstractMcpTool() {
                     if (dir != null) {
                         val dirPath = getRelativePath(project, dir.virtualFile)
                         return@suspendingReadAction createJsonResult(DefinitionResult(
+                            symbolId = bindSymbolId(
+                                project,
+                                effectiveTarget,
+                                optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+                            ),
                             file = dirPath,
                             line = 1,
                             column = 1,
@@ -156,6 +171,11 @@ class FindDefinitionTool : AbstractMcpTool() {
             }
 
             createJsonResult(DefinitionResult(
+                symbolId = bindSymbolId(
+                    project,
+                    effectiveTarget,
+                    optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+                ),
                 file = getRelativePath(project, targetFile),
                 line = targetLine,
                 column = targetColumn,

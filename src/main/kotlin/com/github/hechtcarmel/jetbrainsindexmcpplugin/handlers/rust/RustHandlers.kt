@@ -401,37 +401,48 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
         element: PsiElement,
         project: Project,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        directOnly: Boolean,
+        direction: TypeHierarchyDirection?,
+        page: HierarchyPageRequest?
     ): TypeHierarchyData? {
         LOG.debug("Getting type hierarchy for Rust element at ${element.containingFile?.name}")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
+
+        val collectionLimit = page?.collectionLimit ?: 100
 
         // Handle traits
         val trait = findContainingRsTrait(element)
         if (trait != null) {
             LOG.debug("Getting hierarchy for trait: ${getName(trait)}")
-            return getTraitHierarchy(project, trait, searchScope)
+            return paginateTypeData(
+                getTraitHierarchy(project, trait, searchScope, directOnly, collectionLimit), direction, page
+            )
         }
 
         // Handle structs
         val struct = findContainingRsStruct(element)
         if (struct != null) {
             LOG.debug("Getting hierarchy for struct: ${getName(struct)}")
-            return getTypeImplHierarchy(project, struct, searchScope)
+            return paginateTypeData(
+                getTypeImplHierarchy(project, struct, searchScope, collectionLimit), direction, page
+            )
         }
 
         // Handle enums
         val enum = findContainingRsEnum(element)
         if (enum != null) {
             LOG.debug("Getting hierarchy for enum: ${getName(enum)}")
-            return getTypeImplHierarchy(project, enum, searchScope)
+            return paginateTypeData(
+                getTypeImplHierarchy(project, enum, searchScope, collectionLimit), direction, page
+            )
         }
 
         // Handle impl blocks
         val impl = findContainingRsImpl(element)
         if (impl != null) {
             LOG.debug("Getting hierarchy for impl block")
-            return getImplHierarchy(project, impl, searchScope)
+            return paginateTypeData(getImplHierarchy(project, impl, searchScope), direction, page)
         }
 
         return null
@@ -440,10 +451,14 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
     private fun getTraitHierarchy(
         project: Project,
         trait: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean,
+        maxResults: Int
     ): TypeHierarchyData {
-        val supertypes = getSupertraitHierarchy(project, trait, mutableSetOf(), searchScope = searchScope)
-        val subtypes = getImplementingTypes(project, trait, searchScope)
+        val supertypes = getSupertraitHierarchy(
+            project, trait, mutableSetOf(), searchScope = searchScope, directOnly = directOnly
+        )
+        val subtypes = getImplementingTypes(project, trait, searchScope, maxResults)
 
         LOG.debug("Found ${supertypes.size} supertraits and ${subtypes.size} implementing types")
 
@@ -454,7 +469,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                 file = trait.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, trait),
                 kind = "TRAIT",
-                language = "Rust"
+                language = "Rust",
+                pointerTarget = trait
             ),
             supertypes = supertypes,
             subtypes = subtypes
@@ -466,7 +482,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
         trait: PsiElement,
         visited: MutableSet<String>,
         depth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false
     ): List<TypeElementData> {
         if (depth > MAX_HIERARCHY_DEPTH) return emptyList()
 
@@ -487,7 +504,10 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                 ) {
                     val resolvedName = getName(resolved) ?: continue
                     if (resolvedName !in visited) {
-                        val nestedSupertypes = getSupertraitHierarchy(project, resolved, visited, depth + 1, searchScope)
+                        val nestedSupertypes = if (directOnly) emptyList() else
+                            getSupertraitHierarchy(
+                                project, resolved, visited, depth + 1, searchScope, directOnly = false
+                            )
                         supertypes.add(TypeElementData(
                             name = resolvedName,
                             qualifiedName = getQualifiedName(resolved),
@@ -495,7 +515,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                             line = getLineNumber(project, resolved),
                             kind = "TRAIT",
                             language = "Rust",
-                            supertypes = nestedSupertypes.takeIf { it.isNotEmpty() }
+                            supertypes = nestedSupertypes.takeIf { it.isNotEmpty() },
+                            pointerTarget = resolved
                         ))
                     }
                 }
@@ -510,7 +531,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
     private fun getImplementingTypes(
         project: Project,
         trait: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<TypeElementData> {
         val results = mutableListOf<TypeElementData>()
 
@@ -534,12 +556,13 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                                 file = targetElement.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                                 line = getLineNumber(project, targetElement),
                                 kind = if (resolvedType != null) determineElementKind(resolvedType) else "IMPL",
-                                language = "Rust"
+                                language = "Rust",
+                                pointerTarget = targetElement
                             ))
                         }
                     }
                 }
-                results.size < 100
+                results.size < maxResults
             })
 
             LOG.debug("Found ${results.size} implementing types via DefinitionsScopedSearch")
@@ -553,9 +576,10 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
     private fun getTypeImplHierarchy(
         project: Project,
         type: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): TypeHierarchyData {
-        val implementedTraits = findImplementedTraits(project, type, searchScope)
+        val implementedTraits = findImplementedTraits(project, type, searchScope, maxResults)
 
         return TypeHierarchyData(
             element = TypeElementData(
@@ -564,7 +588,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                 file = type.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, type),
                 kind = determineElementKind(type),
-                language = "Rust"
+                language = "Rust",
+                pointerTarget = type
             ),
             supertypes = implementedTraits,  // Implemented traits shown as "supertypes"
             subtypes = emptyList()           // Rust has no type inheritance
@@ -574,7 +599,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
     private fun findImplementedTraits(
         project: Project,
         type: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<TypeElementData> {
         val results = mutableListOf<TypeElementData>()
 
@@ -607,12 +633,13 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                                 file = targetElement.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                                 line = getLineNumber(project, targetElement),
                                 kind = "TRAIT",
-                                language = "Rust"
+                                language = "Rust",
+                                pointerTarget = targetElement
                             ))
                         }
                     }
                 }
-                results.size < 100
+                results.size < maxResults
             })
         } catch (e: Exception) {
             LOG.debug("Error finding implemented traits: ${e.message}")
@@ -655,7 +682,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                     file = targetElement.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                     line = getLineNumber(project, targetElement),
                     kind = "TRAIT",
-                    language = "Rust"
+                    language = "Rust",
+                    pointerTarget = targetElement
                 ))
             }
         }
@@ -672,7 +700,8 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                     file = targetElement.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                     line = getLineNumber(project, targetElement),
                     kind = if (resolvedType != null) determineElementKind(resolvedType) else "TYPE",
-                    language = "Rust"
+                    language = "Rust",
+                    pointerTarget = targetElement
                 ))
             }
         }
@@ -686,11 +715,30 @@ class RustTypeHierarchyHandler : BaseRustHandler<TypeHierarchyData>(), TypeHiera
                 file = impl.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, impl),
                 kind = "IMPL",
-                language = "Rust"
+                language = "Rust",
+                pointerTarget = impl
             ),
             supertypes = supertypes,
             subtypes = subtypes
         )
+    }
+
+    private fun paginateTypeData(
+        data: TypeHierarchyData,
+        direction: TypeHierarchyDirection?,
+        page: HierarchyPageRequest?
+    ): TypeHierarchyData {
+        if (direction == null || page == null) return data
+        return when (direction) {
+            TypeHierarchyDirection.SUPERTYPE -> {
+                val (items, next) = data.supertypes.applyHierarchyPage(page)
+                data.copy(supertypes = items, subtypes = emptyList(), nextOffset = next)
+            }
+            TypeHierarchyDirection.SUBTYPE -> {
+                val (items, next) = data.subtypes.applyHierarchyPage(page)
+                data.copy(supertypes = emptyList(), subtypes = items, nextOffset = next)
+            }
+        }
     }
 
     private fun buildImplName(traitRef: PsiElement?, typeRef: PsiElement?): String {
@@ -792,7 +840,8 @@ class RustImplementationsHandler : BaseRustHandler<List<ImplementationData>>(), 
                             line = getLineNumber(project, definition) ?: 0,
                             column = getColumnNumber(project, definition) ?: 0,
                             kind = "IMPL",
-                            language = "Rust"
+                            language = "Rust",
+                            pointerTarget = definition
                         ))
                     }
                 }
@@ -838,7 +887,8 @@ class RustImplementationsHandler : BaseRustHandler<List<ImplementationData>>(), 
                             line = getLineNumber(project, definition) ?: 0,
                             column = getColumnNumber(project, definition) ?: 0,
                             kind = "METHOD",
-                            language = "Rust"
+                            language = "Rust",
+                            pointerTarget = definition
                         ))
                     }
                 }
@@ -880,24 +930,28 @@ class RustCallHierarchyHandler : BaseRustHandler<CallHierarchyData>(), CallHiera
         direction: String,
         depth: Int,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        page: HierarchyPageRequest?
     ): CallHierarchyData? {
         val function = findContainingRsFunction(element) ?: return null
         LOG.debug("Getting call hierarchy for ${getName(function)}, direction=$direction, depth=$depth")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
         val visited = mutableSetOf<String>()
-        val calls = if (direction == "callers") {
-            findCallersRecursive(project, function, depth, visited, searchScope = searchScope)
+        val maxResults = page?.collectionLimit ?: MAX_RESULTS_PER_LEVEL
+        val rawCalls = if (direction == "callers") {
+            findCallersRecursive(project, function, depth, visited, searchScope = searchScope, maxResults = maxResults)
         } else {
-            findCalleesRecursive(project, function, depth, visited, searchScope = searchScope)
+            findCalleesRecursive(project, function, depth, visited, searchScope = searchScope, maxResults = maxResults)
         }
+        val (calls, nextOffset) = rawCalls.applyHierarchyPage(page)
 
         LOG.debug("Found ${calls.size} $direction")
 
         return CallHierarchyData(
             element = createCallElement(project, function),
-            calls = calls
+            calls = calls,
+            nextOffset = nextOffset
         )
     }
 
@@ -907,7 +961,8 @@ class RustCallHierarchyHandler : BaseRustHandler<CallHierarchyData>(), CallHiera
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
 
@@ -920,19 +975,21 @@ class RustCallHierarchyHandler : BaseRustHandler<CallHierarchyData>(), CallHiera
 
             ReferencesSearch.search(function, searchScope).forEach(Processor { reference ->
                 references.add(reference)
-                references.size < MAX_RESULTS_PER_LEVEL * 2
+                references.size < (maxResults.toLong() * 2L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             })
 
             LOG.debug("Found ${references.size} references for ${getName(function)}")
 
             val results = mutableListOf<CallElementData>()
             for (reference in references) {
-                if (results.size >= MAX_RESULTS_PER_LEVEL) break
+                if (results.size >= maxResults) break
                 val refElement = reference.element
                 val containingFunction = findContainingRsFunction(refElement)
                 if (containingFunction != null && containingFunction != function) {
                     val children = if (depth > 1) {
-                        findCallersRecursive(project, containingFunction, depth - 1, visited, stackDepth + 1, searchScope)
+                        findCallersRecursive(
+                            project, containingFunction, depth - 1, visited, stackDepth + 1, searchScope, maxResults
+                        )
                     } else null
                     if (shouldIncludeNavigationElement(searchScope, containingFunction)) {
                         results.add(createCallElement(project, containingFunction, children))
@@ -941,7 +998,7 @@ class RustCallHierarchyHandler : BaseRustHandler<CallHierarchyData>(), CallHiera
                     }
                 }
             }
-            results.distinctBy { it.name + it.file + it.line }.take(MAX_RESULTS_PER_LEVEL)
+            results.distinctBy { it.name + it.file + it.line }.take(maxResults)
         } catch (e: Exception) {
             LOG.warn("Error finding callers: ${e.message}")
             emptyList()
@@ -954,7 +1011,8 @@ class RustCallHierarchyHandler : BaseRustHandler<CallHierarchyData>(), CallHiera
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
 
@@ -970,11 +1028,14 @@ class RustCallHierarchyHandler : BaseRustHandler<CallHierarchyData>(), CallHiera
                 @Suppress("UNCHECKED_CAST")
                 val calls = PsiTreeUtil.findChildrenOfType(function, callClass as Class<out PsiElement>)
 
-                calls.take(MAX_RESULTS_PER_LEVEL).forEach { callExpr ->
+                for (callExpr in calls) {
+                    if (callees.size >= maxResults) break
                     val resolved = resolveCallExpression(callExpr)
                     if (resolved != null && isRsFunction(resolved)) {
                         val children = if (depth > 1) {
-                            findCalleesRecursive(project, resolved, depth - 1, visited, stackDepth + 1, searchScope)
+                            findCalleesRecursive(
+                                project, resolved, depth - 1, visited, stackDepth + 1, searchScope, maxResults
+                            )
                         } else null
                         if (shouldIncludeNavigationElement(searchScope, resolved)) {
                             val element = createCallElement(project, resolved, children)
@@ -1088,7 +1149,8 @@ class RustCallHierarchyHandler : BaseRustHandler<CallHierarchyData>(), CallHiera
             line = getLineNumber(project, function) ?: 0,
             column = getColumnNumber(project, function) ?: 0,
             language = "Rust",
-            children = children?.takeIf { it.isNotEmpty() }
+            children = children?.takeIf { it.isNotEmpty() },
+            pointerTarget = function
         )
     }
 
@@ -1174,7 +1236,8 @@ class RustSuperMethodsHandler : BaseRustHandler<SuperMethodsData>(), SuperMethod
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, function) ?: 0,
             column = getColumnNumber(project, function) ?: 0,
-            language = "Rust"
+            language = "Rust",
+            pointerTarget = function
         )
 
         val hierarchy = buildHierarchy(project, trait, methodName, mutableSetOf())
@@ -1202,7 +1265,8 @@ class RustSuperMethodsHandler : BaseRustHandler<SuperMethodsData>(), SuperMethod
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, function) ?: 0,
             column = getColumnNumber(project, function) ?: 0,
-            language = "Rust"
+            language = "Rust",
+            pointerTarget = function
         )
 
         // Find in supertraits
@@ -1249,7 +1313,8 @@ class RustSuperMethodsHandler : BaseRustHandler<SuperMethodsData>(), SuperMethod
                 column = getColumnNumber(project, traitMethod),
                 isInterface = true,  // Traits are like interfaces
                 depth = depth,
-                language = "Rust"
+                language = "Rust",
+                pointerTarget = traitMethod
             ))
         }
 

@@ -81,12 +81,11 @@ class TypeHierarchyToolBehaviorTest : McpPlatformTestCase() {
             parentEntries.size
         )
 
-        // The surviving entry must be the informative one — carrying Parent's own transitive
-        // supertype chain, not the interfaces-loop duplicate whose nested supertypes are null.
-        val nested = parentEntries.single().supertypes?.map { it.name }.orEmpty()
+        // Pagination flattens the deterministic BFS page, so Parent's ancestor is a peer entry
+        // rather than an eagerly materialized nested tree.
         assertTrue(
-            "The single Parent entry must carry its own supertype hier.GrandParent; got $nested",
-            nested.contains("hier.GrandParent")
+            "The hierarchy page must carry Parent's supertype hier.GrandParent; got $supertypeNames",
+            supertypeNames.contains("hier.GrandParent")
         )
     }
 

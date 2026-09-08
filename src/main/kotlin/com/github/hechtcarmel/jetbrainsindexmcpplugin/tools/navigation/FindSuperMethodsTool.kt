@@ -23,6 +23,8 @@ import kotlinx.serialization.json.JsonObject
  */
 class FindSuperMethodsTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     override val name = ToolNames.FIND_SUPER_METHODS
 
     override val description = """
@@ -35,6 +37,7 @@ class FindSuperMethodsTool : AbstractMcpTool() {
         Returns: full hierarchy chain from immediate parent (depth=1) to root, with file locations (line/column) and containing class info.
 
         Target (mutually exclusive):
+        - symbolId: opaque handle returned by a previous semantic call
         - file + line + column: position-based lookup (position can be anywhere within the method body)
         - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()})
 
@@ -46,6 +49,8 @@ class FindSuperMethodsTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
+        .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
         .languageAndSymbol(required = false)
@@ -86,7 +91,12 @@ class FindSuperMethodsTool : AbstractMcpTool() {
                     file = superMethodsData.method.file,
                     line = superMethodsData.method.line,
                     column = superMethodsData.method.column,
-                    language = superMethodsData.method.language
+                    language = superMethodsData.method.language,
+                    symbolId = bindSymbolId(
+                        project,
+                        superMethodsData.method.pointerTarget ?: element,
+                        optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+                    )
                 ),
                 hierarchy = superMethodsData.hierarchy.map { superMethod ->
                     SuperMethodInfo(
@@ -99,7 +109,8 @@ class FindSuperMethodsTool : AbstractMcpTool() {
                         column = superMethod.column,
                         isInterface = superMethod.isInterface,
                         depth = superMethod.depth,
-                        language = superMethod.language
+                        language = superMethod.language,
+                        symbolId = superMethod.pointerTarget?.let { bindSymbolId(project, it) }
                     )
                 },
                 totalCount = superMethodsData.hierarchy.size

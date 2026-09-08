@@ -395,7 +395,7 @@ Three tiers, selected by class-name suffix:
      schema into `src/test/resources/contract/tool-manifest.json`. This is the regression net
      for large refactors: one assertion covers every registered tool × every schema property, so
      a dropped `register(...)` call or a mutated parameter type fails here instead of shipping.
-     Scope: 49 of the 52 tools in `ToolNames.ALL` (the three needing the Kotlin or Maven plugin
+     Scope: 51 of the 54 tools in `ToolNames.ALL` (the three needing the Kotlin or Maven plugin
      are covered by set-equality instead), and **inputs only**.
    - `ResultShapeContractUnitTest` snapshots the other half of the client contract — the response
      side — into `src/test/resources/contract/result-shapes.txt`: the wire key set, JSON value
@@ -502,7 +502,7 @@ Tools are organized by IDE availability.
 - `ide_find_symbol` - Search for symbols (classes, methods, fields, functions) by name with IntelliJ Go to Symbol matching (disabled by default)
 - `ide_search_text` - Text search using IntelliJ Find in Files with context filtering (substring matching for plain text, regex matching when enabled). Optional `paths` restricts the search to project-relative globs (`!` prefix excludes)
 - `ide_read_file` - Read file content by path or qualified name, including library/jar sources (disabled by default)
-- `ide_diagnostics` - Unified diagnostics tool: per-file code analysis (errors, warnings, intentions), build output from last build, and test results from open test run tabs. Supports `includeBuildErrors`, `includeTestResults`, `severity` filter, `testResultFilter`, `maxBuildErrors`, `maxTestResults`. The `file` parameter is now optional. The result's `analysisMode` reports which path produced file problems: `open_daemon` or `closed_batch`. The analyzed file is refreshed from disk and committed to PSI first, so an out-of-band edit is analyzed as written without an `ide_sync_files` call.
+- `ide_diagnostics` - Unified diagnostics tool: per-file code analysis (errors, warnings, intentions), build output from last build, and test results from open test run tabs. Supports one `file` or up to 100 unique `files` under a shared timeout budget, plus `includeBuildErrors`, `includeTestResults`, `severity`, `testResultFilter`, `maxBuildErrors`, and `maxTestResults`. The result's `analysisMode` reports which path produced single-file problems (`open_daemon` or `closed_batch`); multi-file calls use `fileAnalyses`. The analyzed files are refreshed from disk and committed to PSI first, so an out-of-band edit is analyzed as written without an `ide_sync_files` call.
 - `ide_project_diagnostics` - Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata (issue #246): every file in scope gets exactly one state (`analyzed`/`timed_out`/`failed`/`skipped`/`not_analyzed`) and `complete` is true only when every considered file was analyzed, so an empty problems list can never be mistaken for a clean project. Reuses the per-file analysis engine (open files get daemon highlights, closed files the public batch pass). Long analyses long-poll via `analysisId` (same pattern as `ide_build_project`); one analysis per project at a time. (disabled by default)
 - `ide_index_status` - Check indexing status (dumb/smart mode)
 - `ide_sync_files` - Force sync IDE's virtual file system and PSI cache with external file changes
@@ -628,6 +628,69 @@ The plugin supports cursor-based pagination for search tools that return flat re
 **Schema:** All parameters are optional in the schema (no `required` array) because the Anthropic API does not support `anyOf`/`oneOf` at the top level. Validation is done at runtime — if `cursor` is absent, the tool checks for its required search params and returns an error if missing.
 
 **Backward compatibility:** Old `limit`/`maxResults` parameters work as aliases for `pageSize`. Legacy cursors (without embedded pageSize) are still decodable but require an explicit `pageSize` parameter.
+
+### Opaque Symbol IDs
+
+Semantic discovery results carry a `symbolId` backed by a server-side
+`SmartPsiElementPointer`. The token itself is opaque and contains no path, offset, name, or
+project data. Prefer it to coordinates when chaining `ide_find_references`,
+`ide_find_definition`, `ide_symbol_info`, hierarchy/implementation tools, and symbol-oriented
+refactorings; it disambiguates overloads and local declarations and follows ordinary source
+movement.
+
+The ID is deliberately a non-canonical session handle: binding one PSI declaration more than once
+may yield several unequal handles that are all valid simultaneously. Never use ID equality as
+symbol equality. Reusing one concrete handle remains stable across line shifts and rename while it
+is still inside the session/project/TTL/LRU bounds.
+
+`SymbolIdRegistry` is an application service owned by the running MCP server generation. It is
+access-order LRU bounded (4,096 entries), expires entries after one hour of inactivity, keys them
+to the exact `Project` object identity, and is cleared on MCP server stop/restart. It stores no
+fallback query. A missing, evicted, wrong-project, deleted, or otherwise unrestorable pointer must
+return `SYMBOL_ID_EXPIRED` — never resolve by saved coordinates or choose a nearby PSI element.
+After a successful symbol refactoring, return `updatedSymbol` with current metadata and the same
+ID when it can be rebound (otherwise a new ID); safe delete returns `invalidatedSymbolId`.
+
+Target-aware semantic/refactoring tools additionally accept exactly one nested `target` variant:
+`{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Runtime normalization
+maps it to the legacy selectors; nested and top-level selectors must not be mixed. The dispatcher
+must inspect `target.symbolId` when routing a request to an owning project. Keep legacy top-level
+selectors for compatibility.
+
+After a plugin install/update and IDE reload, reconnect or restart the MCP client. Clients such as
+Codex cache `ALL_TOOLS`; an existing connection can therefore retain old schemas. Keep
+`ServerCapabilities.Tools.listChanged=false` until every server transport can actually publish and
+serve tool-list change notifications.
+
+Refactoring preview is one shared wire contract for rename, safe delete, and change signature.
+With `dryRun=true`, perform target resolution, validation, usage/conflict discovery, and affected
+file estimation, then return `RefactoringPreviewResult`. Do not enter the refactoring/source-write
+phase, call document save APIs, run the mutating processor phase, or register an undo command.
+Tests must compare every fixture file byte-for-byte before and after the preview.
+
+Hierarchy traversal belongs to the tools, not recursive language-handler collection. Request one
+edge at a time and emit deterministic breadth-first pages, enforcing `maxNodes` while nodes are
+returned and expanded. Continuations are separate from ordinary search pagination: keep a
+session/project-bound smart-pointer frontier with its own 128-entry LRU and ten-minute inactivity
+TTL, and return `returnedNodes`, `truncated`, `elapsedMs`, `hasMore`, and `cursor`. Type hierarchy
+must additionally retain the legacy `supertypes`/`subtypes` arrays and emit
+`traversal: [{direction, element}]` in the exact combined wire/BFS order; clients cannot reconstruct
+that order by concatenating the direction-specific arrays. Do not advertise live progress on the
+stateless HTTP transport.
+
+`ide_diagnostics` keeps the single-`file` response compatible and accepts up to 100 unique `files`
+as an exclusive alternative. A multi-file request has one shared deadline, one aggregate `problems` list, and one
+`FileDiagnosticsAnalysis` per requested path. Location/intention fields remain single-file only.
+For targeted VFS sync, validate the whole batch inside the selected base/content root before
+refreshing anything. A deleted target refreshes its nearest existing parent; expose requested,
+actually refreshed, and deleted paths separately, and reject traversal/absolute/symlink escapes.
+
+`ide_file_structure.structure` is compatibility output and must remain. Build `nodes` from the
+exact extracted PSI elements and bind `symbolId` there; never reconstruct node identity from a line
+number. Kotlin class kind comes from semantic Kt PSI flags (`INTERFACE`, `CLASS`, `ENUM`,
+`ANNOTATION`, `OBJECT`), and qualified names go through `PsiUtils.qualifiedName`. Anonymous
+implementations use `<anonymous implementation of Base at File.kt:line>` and keep
+`qualifiedName=null`.
 
 ### Search Collection Pattern (Processor)
 

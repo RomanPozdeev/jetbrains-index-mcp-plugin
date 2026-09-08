@@ -1140,14 +1140,28 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
         element: PsiElement,
         project: Project,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        directOnly: Boolean,
+        direction: TypeHierarchyDirection?,
+        page: HierarchyPageRequest?
     ): TypeHierarchyData? {
         val jsClass = findContainingJSClass(element) ?: return null
         LOG.debug("Getting type hierarchy for JS class: ${getName(jsClass)}")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
-        val supertypes = getSupertypes(project, jsClass, searchScope = searchScope)
-        val subtypes = getSubtypes(project, jsClass, searchScope)
+        val collectionLimit = page?.collectionLimit ?: 100
+        val rawSupertypes = if (direction != TypeHierarchyDirection.SUBTYPE) {
+            getSupertypes(project, jsClass, searchScope = searchScope, directOnly = directOnly).take(collectionLimit)
+        } else emptyList()
+        val rawSubtypes = if (direction != TypeHierarchyDirection.SUPERTYPE) {
+            getSubtypes(project, jsClass, searchScope, directOnly, collectionLimit)
+        } else emptyList()
+        val (supertypes, superNext) = if (direction == TypeHierarchyDirection.SUPERTYPE) {
+            rawSupertypes.applyHierarchyPage(page)
+        } else rawSupertypes to null
+        val (subtypes, subtypeNext) = if (direction == TypeHierarchyDirection.SUBTYPE) {
+            rawSubtypes.applyHierarchyPage(page)
+        } else rawSubtypes to null
 
         LOG.debug("Found ${supertypes.size} supertypes and ${subtypes.size} subtypes")
 
@@ -1158,10 +1172,12 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
                 file = jsClass.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, jsClass),
                 kind = getClassKind(jsClass),
-                language = getLanguageName(jsClass)
+                language = getLanguageName(jsClass),
+                pointerTarget = jsClass
             ),
             supertypes = supertypes,
-            subtypes = subtypes
+            subtypes = subtypes,
+            nextOffset = superNext ?: subtypeNext
         )
     }
 
@@ -1170,7 +1186,8 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
         jsClass: PsiElement,
         visited: MutableSet<String> = mutableSetOf(),
         depth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false
     ): List<TypeElementData> {
         if (depth > MAX_HIERARCHY_DEPTH) return emptyList()
 
@@ -1186,7 +1203,8 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
             superClasses?.filterIsInstance<PsiElement>()?.forEach { superClass ->
                 val superName = getQualifiedName(superClass) ?: getName(superClass)
                 if (superName != null && shouldIncludeNavigationElement(searchScope, superClass)) {
-                    val superSupertypes = getSupertypes(project, superClass, visited, depth + 1, searchScope)
+                    val superSupertypes = if (directOnly) emptyList() else
+                        getSupertypes(project, superClass, visited, depth + 1, searchScope, directOnly = false)
                     supertypes.add(TypeElementData(
                         name = superName,
                         qualifiedName = getQualifiedName(superClass),
@@ -1194,7 +1212,8 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
                         line = getLineNumber(project, superClass),
                         kind = getClassKind(superClass),
                         language = getLanguageName(superClass),
-                        supertypes = superSupertypes.takeIf { it.isNotEmpty() }
+                        supertypes = superSupertypes.takeIf { it.isNotEmpty() },
+                        pointerTarget = superClass
                     ))
                 }
             }
@@ -1208,7 +1227,8 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
                     ifaceName !in visited &&
                     shouldIncludeNavigationElement(searchScope, iface)
                 ) {
-                    val ifaceSupertypes = getSupertypes(project, iface, visited, depth + 1, searchScope)
+                    val ifaceSupertypes = if (directOnly) emptyList() else
+                        getSupertypes(project, iface, visited, depth + 1, searchScope, directOnly = false)
                     supertypes.add(TypeElementData(
                         name = ifaceName,
                         qualifiedName = getQualifiedName(iface),
@@ -1216,7 +1236,8 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
                         line = getLineNumber(project, iface),
                         kind = "INTERFACE",
                         language = getLanguageName(iface),
-                        supertypes = ifaceSupertypes.takeIf { it.isNotEmpty() }
+                        supertypes = ifaceSupertypes.takeIf { it.isNotEmpty() },
+                        pointerTarget = iface
                     ))
                 }
             }
@@ -1227,14 +1248,27 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
         return supertypes
     }
 
+    private fun isDirectSubtypeOf(candidate: PsiElement, expectedParent: PsiElement): Boolean {
+        val expectedName = getQualifiedName(expectedParent) ?: getName(expectedParent) ?: return false
+        val directParents = buildList {
+            getSuperClasses(candidate)?.filterIsInstance<PsiElement>()?.let(::addAll)
+            getImplementedInterfaces(candidate)?.filterIsInstance<PsiElement>()?.let(::addAll)
+        }
+        return directParents.any { parent ->
+            parent === expectedParent || (getQualifiedName(parent) ?: getName(parent)) == expectedName
+        }
+    }
+
     private fun getSubtypes(
         project: Project,
         jsClass: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean,
+        maxResults: Int
     ): List<TypeElementData> {
         // Strategy 1: Try JSInheritorsSearch (JavaScript plugin API)
         try {
-            val result = searchUsingJSInheritorsSearch(project, jsClass, searchScope)
+            val result = searchUsingJSInheritorsSearch(project, jsClass, searchScope, directOnly, maxResults)
             if (result.isNotEmpty()) {
                 LOG.debug("Found ${result.size} subtypes via JSInheritorsSearch")
                 return result
@@ -1245,7 +1279,9 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
 
         // Strategy 2: Try DefinitionsScopedSearch (Platform API)
         try {
-            val result = searchSubtypesUsingDefinitionsScopedSearch(project, jsClass, searchScope)
+            val result = searchSubtypesUsingDefinitionsScopedSearch(
+                project, jsClass, searchScope, directOnly, maxResults
+            )
             if (result.isNotEmpty()) {
                 LOG.debug("Found ${result.size} subtypes via DefinitionsScopedSearch")
                 return result
@@ -1261,7 +1297,9 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
     private fun searchUsingJSInheritorsSearch(
         project: Project,
         jsClass: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean,
+        maxResults: Int
     ): List<TypeElementData> {
         val searchClass = Class.forName("com.intellij.lang.javascript.psi.resolve.JSInheritorsSearch")
         val searchMethod = searchClass.getMethod("search", jsClassClass)
@@ -1270,17 +1308,22 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
         val results = mutableListOf<TypeElementData>()
         val forEachMethod = query.javaClass.getMethod("forEach", Processor::class.java)
         forEachMethod.invoke(query, Processor<Any> { inheritor ->
-            if (inheritor is PsiElement && shouldIncludeNavigationElement(searchScope, inheritor)) {
+            if (
+                inheritor is PsiElement &&
+                shouldIncludeNavigationElement(searchScope, inheritor) &&
+                (!directOnly || isDirectSubtypeOf(inheritor, jsClass))
+            ) {
                 results.add(TypeElementData(
                     name = getQualifiedName(inheritor) ?: getName(inheritor) ?: "unknown",
                     qualifiedName = getQualifiedName(inheritor),
                     file = inheritor.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                     line = getLineNumber(project, inheritor),
                     kind = getClassKind(inheritor),
-                    language = getLanguageName(inheritor)
+                    language = getLanguageName(inheritor),
+                    pointerTarget = inheritor
                 ))
             }
-            results.size < 100
+            results.size < maxResults
         })
 
         return results
@@ -1289,22 +1332,30 @@ class JavaScriptTypeHierarchyHandler : BaseJavaScriptHandler<TypeHierarchyData>(
     private fun searchSubtypesUsingDefinitionsScopedSearch(
         project: Project,
         jsClass: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean,
+        maxResults: Int
     ): List<TypeElementData> {
         val results = mutableListOf<TypeElementData>()
 
         DefinitionsScopedSearch.search(jsClass, searchScope).forEach(Processor { definition ->
-            if (definition != jsClass && isJSClass(definition) && shouldIncludeNavigationElement(searchScope, definition)) {
+            if (
+                definition != jsClass &&
+                isJSClass(definition) &&
+                shouldIncludeNavigationElement(searchScope, definition) &&
+                (!directOnly || isDirectSubtypeOf(definition, jsClass))
+            ) {
                 results.add(TypeElementData(
                     name = getQualifiedName(definition) ?: getName(definition) ?: "unknown",
                     qualifiedName = getQualifiedName(definition),
                     file = definition.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                     line = getLineNumber(project, definition),
                     kind = getClassKind(definition),
-                    language = getLanguageName(definition)
+                    language = getLanguageName(definition),
+                    pointerTarget = definition
                 ))
             }
-            results.size < 100
+            results.size < maxResults
         })
 
         return results
@@ -1406,7 +1457,8 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                         line = getLineNumber(project, overridingMethod) ?: 0,
                         column = getColumnNumber(project, overridingMethod) ?: 0,
                         kind = "METHOD",
-                        language = getLanguageName(overridingMethod)
+                        language = getLanguageName(overridingMethod),
+                        pointerTarget = overridingMethod
                     ))
                 }
             }
@@ -1468,7 +1520,8 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                         line = getLineNumber(project, inheritor) ?: 0,
                         column = getColumnNumber(project, inheritor) ?: 0,
                         kind = getClassKind(inheritor),
-                        language = getLanguageName(inheritor)
+                        language = getLanguageName(inheritor),
+                        pointerTarget = inheritor
                     ))
                 }
             }
@@ -1500,7 +1553,8 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                         line = getLineNumber(project, definition) ?: 0,
                         column = getColumnNumber(project, definition) ?: 0,
                         kind = kind,
-                        language = getLanguageName(definition)
+                        language = getLanguageName(definition),
+                        pointerTarget = definition
                     ))
                 }
             }
@@ -1555,25 +1609,33 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
         direction: String,
         depth: Int,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        page: HierarchyPageRequest?
     ): CallHierarchyData? {
         val jsFunction = findContainingJSFunction(resolveJsTsCallHierarchySeed(element)) ?: return null
         LOG.debug("Getting call hierarchy for ${getName(jsFunction)}, direction=$direction, depth=$depth")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
         val visited = mutableSetOf<String>()
-        val calls = if (direction == "callers") {
-            findCallersRecursive(project, jsFunction, depth, visited, searchScope = searchScope)
+        val maxResults = page?.collectionLimit ?: MAX_RESULTS_PER_LEVEL
+        val rawCalls = if (direction == "callers") {
+            findCallersRecursive(
+                project, jsFunction, depth, visited, searchScope = searchScope, maxResults = maxResults
+            )
                 .map(PrioritizedCallerResult::call)
         } else {
-            findCalleesRecursive(project, jsFunction, depth, visited, searchScope = searchScope)
+            findCalleesRecursive(
+                project, jsFunction, depth, visited, searchScope = searchScope, maxResults = maxResults
+            )
         }
+        val (calls, nextOffset) = rawCalls.applyHierarchyPage(page)
 
         LOG.debug("Found ${calls.size} ${direction}")
 
         return CallHierarchyData(
             element = createCallElement(project, jsFunction),
-            calls = calls
+            calls = calls,
+            nextOffset = nextOffset
         )
     }
 
@@ -1627,7 +1689,8 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<PrioritizedCallerResult> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
 
@@ -1644,7 +1707,7 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
             // barrels in a bounded breadth-first way. This keeps caller discovery aligned
             // with reference-search behavior without treating unrelated symbols from the same
             // barrel as callers.
-            val allReferences = collectCallerReferences(methodsToSearch, searchScope)
+            val allReferences = collectCallerReferences(methodsToSearch, searchScope, maxResults)
 
             LOG.debug("Found ${allReferences.size} references for ${getName(jsFunction)}")
 
@@ -1654,7 +1717,9 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
                 val containingFunction = findContainingCallable(refElement)
                 if (containingFunction != null && containingFunction != jsFunction && !methodsToSearch.contains(containingFunction)) {
                     val children = if (depth > 1) {
-                        findCallersRecursive(project, containingFunction, depth - 1, visited, stackDepth + 1, searchScope)
+                        findCallersRecursive(
+                            project, containingFunction, depth - 1, visited, stackDepth + 1, searchScope, maxResults
+                        )
                     } else null
                     if (shouldIncludeNavigationElement(searchScope, containingFunction)) {
                         putCallerResult(
@@ -1671,7 +1736,7 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
                 }
             }
 
-            buildVisibleCallerResults(resultsByKey)
+            buildVisibleCallerResults(resultsByKey, maxResults)
         } catch (e: Exception) {
             LOG.warn("Error finding callers: ${e.message}")
             emptyList()
@@ -1690,23 +1755,31 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
         }
     }
 
-    private fun buildVisibleCallerResults(resultsByKey: LinkedHashMap<String, PrioritizedCallerResult>): List<PrioritizedCallerResult> {
+    private fun buildVisibleCallerResults(
+        resultsByKey: LinkedHashMap<String, PrioritizedCallerResult>,
+        maxResults: Int
+    ): List<PrioritizedCallerResult> {
         val prioritized = resultsByKey.values.filter { it.source == CallerReferenceSource.BARREL_TRAVERSAL }
-        if (prioritized.size >= MAX_RESULTS_PER_LEVEL) {
-            return prioritized.take(MAX_RESULTS_PER_LEVEL)
+        if (prioritized.size >= maxResults) {
+            return prioritized.take(maxResults)
         }
 
         val direct = resultsByKey.values.filter { it.source == CallerReferenceSource.DIRECT }
-        return buildList(MAX_RESULTS_PER_LEVEL) {
+        return buildList(maxResults) {
             addAll(prioritized)
-            addAll(direct.take(MAX_RESULTS_PER_LEVEL - size))
+            addAll(direct.take(maxResults - size))
         }
     }
 
     private fun collectCallerReferences(
         methodsToSearch: Set<PsiElement>,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CollectedCallerReference> {
+        val maxReferences = maxOf(
+            MAX_BARREL_REFERENCES_TO_COLLECT,
+            (maxResults.toLong() * 2L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        )
         val pendingSymbols = ArrayDeque<PsiNamedElement>()
         methodsToSearch
             .asSequence()
@@ -1722,7 +1795,7 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
         while (
             pendingSymbols.isNotEmpty() &&
             visitedSymbols.size < MAX_BARREL_SYMBOLS_TO_TRAVERSE &&
-            referencesByKey.size < MAX_BARREL_REFERENCES_TO_COLLECT
+            referencesByKey.size < maxReferences
         ) {
             val symbol = pendingSymbols.removeFirst()
             val symbolKey = getPsiTraversalKey(symbol)
@@ -1745,7 +1818,7 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
                         findBarrelTraversalCandidates(reference.element, methodsToSearch, symbol)
                     )
                 }
-                referencesByKey.size < MAX_BARREL_REFERENCES_TO_COLLECT
+                referencesByKey.size < maxReferences
             })
 
             val containingFile = symbol.containingFile
@@ -1760,7 +1833,7 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
                             findBarrelTraversalCandidates(reference.element, methodsToSearch, symbol)
                         )
                     }
-                    referencesByKey.size < MAX_BARREL_REFERENCES_TO_COLLECT
+                    referencesByKey.size < maxReferences
                 })
             }
         }
@@ -2047,7 +2120,8 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
 
@@ -2061,11 +2135,14 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
             @Suppress("UNCHECKED_CAST")
             val callExpressions = PsiTreeUtil.findChildrenOfType(jsFunction, jsCallExpr as Class<out PsiElement>)
 
-            callExpressions.take(MAX_RESULTS_PER_LEVEL).forEach { callExpr ->
+            for (callExpr in callExpressions) {
+                if (callees.size >= maxResults) break
                 val calledFunction = resolveCallExpression(callExpr)
                 if (calledFunction != null && isJSFunction(calledFunction)) {
                     val children = if (depth > 1) {
-                        findCalleesRecursive(project, calledFunction, depth - 1, visited, stackDepth + 1, searchScope)
+                        findCalleesRecursive(
+                            project, calledFunction, depth - 1, visited, stackDepth + 1, searchScope, maxResults
+                        )
                     } else null
                     if (shouldIncludeNavigationElement(searchScope, calledFunction)) {
                         val element = createCallElement(project, calledFunction, children)
@@ -2126,7 +2203,8 @@ class JavaScriptCallHierarchyHandler : BaseJavaScriptHandler<CallHierarchyData>(
             line = getLineNumber(project, jsFunction) ?: 0,
             column = getColumnNumber(project, jsFunction) ?: 0,
             language = getLanguageName(jsFunction),
-            children = children?.takeIf { it.isNotEmpty() }
+            children = children?.takeIf { it.isNotEmpty() },
+            pointerTarget = jsFunction
         )
     }
 }
@@ -2158,7 +2236,8 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, jsFunction) ?: 0,
             column = getColumnNumber(project, jsFunction) ?: 0,
-            language = getLanguageName(jsFunction)
+            language = getLanguageName(jsFunction),
+            pointerTarget = jsFunction
         )
 
         val hierarchy = buildHierarchy(project, jsFunction)
@@ -2204,7 +2283,8 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
                         column = getColumnNumber(project, superMethod),
                         isInterface = getClassKind(superClass) == "INTERFACE",
                         depth = depth,
-                        language = getLanguageName(superMethod)
+                        language = getLanguageName(superMethod),
+                        pointerTarget = superMethod
                     ))
 
                     hierarchy.addAll(buildHierarchy(project, superMethod, visited, depth + 1))
@@ -2233,7 +2313,8 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
                         column = getColumnNumber(project, superMethod),
                         isInterface = true,
                         depth = depth,
-                        language = getLanguageName(superMethod)
+                        language = getLanguageName(superMethod),
+                        pointerTarget = superMethod
                     ))
                 }
             }
@@ -2459,7 +2540,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             signature = buildClassSignature(jsClass),
             line = getLineNumber(project, jsClass) ?: 0,
             endLine = getEndLineNumber(project, jsClass),
-            children = children.sortedBy { it.line }
+            children = children.sortedBy { it.line },
+            pointerTarget = jsClass
         )
     }
 
@@ -2471,7 +2553,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = getJavaScriptModifiers(jsFunction),
             signature = buildFunctionSignature(jsFunction),
             line = getLineNumber(project, jsFunction) ?: 0,
-            endLine = getEndLineNumber(project, jsFunction)
+            endLine = getEndLineNumber(project, jsFunction),
+            pointerTarget = jsFunction
         )
     }
 
@@ -2483,7 +2566,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = getJavaScriptModifiers(jsFunction),
             signature = buildFunctionSignature(jsFunction),
             line = getLineNumber(project, jsFunction) ?: 0,
-            endLine = getEndLineNumber(project, jsFunction)
+            endLine = getEndLineNumber(project, jsFunction),
+            pointerTarget = jsFunction
         )
     }
 
@@ -2495,7 +2579,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = emptyList(),
             signature = null,
             line = getLineNumber(project, jsVariable) ?: 0,
-            endLine = getEndLineNumber(project, jsVariable)
+            endLine = getEndLineNumber(project, jsVariable),
+            pointerTarget = jsVariable
         )
     }
 
@@ -2507,7 +2592,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = getJavaScriptModifiers(field),
             signature = null,
             line = getLineNumber(project, field) ?: 0,
-            endLine = getEndLineNumber(project, field)
+            endLine = getEndLineNumber(project, field),
+            pointerTarget = field
         )
     }
 

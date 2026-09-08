@@ -2,15 +2,21 @@ package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.UnifiedTargetArguments
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.*
 import com.intellij.openapi.project.Project
+import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.SmartPointerManager
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class EditMemberTool : AbstractMcpTool() {
+
+    override val supportsUnifiedTarget: Boolean = true
 
     override val name = ToolNames.EDIT_MEMBER
 
@@ -28,6 +34,7 @@ class EditMemberTool : AbstractMcpTool() {
         Auto-reformats the changed range by default.
 
         Examples:
+        - {"symbolId": "<opaque-id>", "content": "public void renamed() {}"}
         - {"file": "src/Main.java", "class": "Main", "member": "process", "content": "public void process(String input, boolean validate) {\n    if (validate) check(input);\n}"}
         - {"file": "src/Config.kt", "class": "Config", "member": "timeout", "content": "val timeout: Duration = Duration.ofSeconds(30)"}
         - {"file": "src/Service.java", "member": "Service", "content": "public class Service<T> implements Serializable { ... }"}
@@ -35,9 +42,12 @@ class EditMemberTool : AbstractMcpTool() {
 
     override val inputSchema = SchemaBuilder.tool()
         .projectPath()
-        .file(description = "Path to file relative to project root. REQUIRED.")
+        .target()
+        .symbolId()
+        .languageAndSymbol(required = false)
+        .file(required = false, description = "Path to file relative to project root. Required with member selectors; omit when symbolId is used.")
         .stringProperty(ParamNames.CLASS, "Class/interface name containing the member. Optional for top-level members (Kotlin).")
-        .stringProperty(ParamNames.MEMBER, "Name of the method, function, field, or property to replace entirely.", required = true)
+        .stringProperty(ParamNames.MEMBER, "Name of the method, function, field, or property to replace entirely. Required unless symbolId is used.")
         .intProperty(ParamNames.PARAMETER_COUNT, "Number of parameters (for disambiguating overloaded methods).")
         .intProperty(ParamNames.LINE, "1-based line number of the member (for disambiguation when multiple members share the same name).")
         .stringProperty(ParamNames.CONTENT, "The complete replacement member declaration including modifiers, type, name, and body.", required = true)
@@ -45,10 +55,11 @@ class EditMemberTool : AbstractMcpTool() {
         .build()
 
     override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
-        val filePath = arguments[ParamNames.FILE]?.jsonPrimitive?.content
-            ?: return createErrorResult("Missing required parameter: file")
-        val memberName = arguments[ParamNames.MEMBER]?.jsonPrimitive?.content
-            ?: return createErrorResult("Missing required parameter: member")
+        val requestedSymbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+        val hasQualifiedTarget = optionalStringArg(arguments, ParamNames.LANGUAGE) != null ||
+            optionalStringArg(arguments, ParamNames.SYMBOL) != null
+        val hasStructuredTarget = optionalStringArg(arguments, UnifiedTargetArguments.NORMALIZED_VARIANT) != null
+        val memberName = optionalStringArg(arguments, ParamNames.MEMBER) ?: "<symbolId>"
         val content = arguments[ParamNames.CONTENT]?.jsonPrimitive?.content
             ?: return createErrorResult("Missing required parameter: content")
         if (content.isBlank()) {
@@ -58,22 +69,87 @@ class EditMemberTool : AbstractMcpTool() {
         val parameterCount = MemberEditingUtils.getOptionalInt(arguments, ParamNames.PARAMETER_COUNT)
         val line = MemberEditingUtils.getOptionalInt(arguments, ParamNames.LINE)
         val reformat = MemberEditingUtils.getOptionalBoolean(arguments, ParamNames.REFORMAT)
-
-        val virtualFile = resolveFile(project, filePath)
-            ?: return createErrorResult("File not found: $filePath")
-        ensureWritable(virtualFile)?.let { return it }
+        val hasLegacyMemberSelector = listOf(ParamNames.FILE, ParamNames.CLASS, ParamNames.MEMBER).any {
+            optionalStringArg(arguments, it) != null
+        } || parameterCount != null || line != null
 
         val prep = suspendingReadAction {
-            prepareMemberEdit(project, virtualFile, filePath, className, memberName, parameterCount, line)
+            if (requestedSymbolId != null || hasQualifiedTarget || hasStructuredTarget) {
+                if (!hasStructuredTarget && hasLegacyMemberSelector) {
+                    Result.failure(IllegalArgumentException(ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE))
+                } else {
+                    prepareMemberEditBySemanticTarget(project, arguments, requestedSymbolId)
+                }
+            } else {
+                val filePath = optionalStringArg(arguments, ParamNames.FILE)
+                    ?: return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("Missing required parameter: ${ParamNames.FILE}")
+                    )
+                if (memberName == "<symbolId>") {
+                    return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("Missing required parameter: ${ParamNames.MEMBER}")
+                    )
+                }
+                val virtualFile = resolveFile(project, filePath)
+                    ?: return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("File not found: $filePath")
+                    )
+                if (!virtualFile.isWritable) {
+                    return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("File is read-only and cannot be modified: ${virtualFile.path}")
+                    )
+                }
+                prepareMemberEdit(project, virtualFile, filePath, className, memberName, parameterCount, line)
+            }
         }
 
         return when {
             prep.isFailure -> prep.exceptionOrNull()!!.let { handleError(it, memberName) }
             else -> {
                 val p = prep.getOrThrow()
-                applyFullReplacement(project, p, content, reformat)
+                applyFullReplacement(project, p, content, reformat, requestedSymbolId)
             }
         }
+    }
+
+    private fun prepareMemberEditBySemanticTarget(
+        project: Project,
+        arguments: JsonObject,
+        symbolId: String?
+    ): Result<MemberEditPreparation> {
+        val rawElement = resolveElementFromArguments(project, arguments).getOrElse { return Result.failure(it) }
+        // A position resolves initially to the leaf token under the cursor. Convert that token to
+        // its semantic declaration before asking the language-specific member resolver; symbolId
+        // and qualified-name selectors already resolve directly to their declaration.
+        val element = if (
+            optionalStringArg(arguments, UnifiedTargetArguments.NORMALIZED_VARIANT) == UnifiedTargetArguments.POSITION
+        ) {
+            PsiUtils.resolveTargetElement(rawElement) ?: rawElement
+        } else {
+            rawElement
+        }
+        val psiFile = element.containingFile
+            ?: return Result.failure(
+                IllegalArgumentException(symbolId?.let(ErrorMessages::symbolIdExpired) ?: "Target has no source file")
+            )
+        val virtualFile = psiFile.virtualFile
+            ?: return Result.failure(
+                IllegalArgumentException(symbolId?.let(ErrorMessages::symbolIdExpired) ?: "Target has no editable source file")
+            )
+        if (!virtualFile.isWritable) {
+            return Result.failure(IllegalArgumentException("File is read-only and cannot be modified: ${virtualFile.path}"))
+        }
+        val resolver = MemberEditingUtils.getResolver(psiFile, project)
+            ?: return Result.failure(
+                IllegalArgumentException("Member editing not supported for ${psiFile.language.displayName}. Supported: Java, Kotlin.")
+            )
+        val member = resolver.resolveMember(element)
+            ?: return Result.failure(IllegalArgumentException("Target does not identify an editable Java/Kotlin member"))
+        val document = MemberEditingUtils.getDocument(psiFile)
+            ?: return Result.failure(IllegalArgumentException("Cannot get document for file: ${virtualFile.path}"))
+        return Result.success(
+            MemberEditPreparation(psiFile, document, member, ProjectUtils.getToolFilePath(project, virtualFile))
+        )
     }
 
     private fun prepareMemberEdit(
@@ -115,9 +191,13 @@ class EditMemberTool : AbstractMcpTool() {
         project: Project,
         prep: MemberEditPreparation,
         content: String,
-        reformat: Boolean
+        reformat: Boolean,
+        requestedSymbolId: String?
     ): CallToolResult {
         val member = prep.member
+        val pointer = suspendingReadAction {
+            SmartPointerManager.getInstance(project).createSmartPsiElementPointer(member.element)
+        }
 
         var startLine = 0
         var endLine = 0
@@ -149,13 +229,21 @@ class EditMemberTool : AbstractMcpTool() {
 
         edtAction { MemberEditingUtils.saveToDisk() }
 
+        val updatedSymbol = suspendingReadAction {
+            val target = pointer.element
+                ?: prep.psiFile.findElementAt(member.startOffset.coerceAtMost(prep.psiFile.textLength - 1))
+                    ?.let(PsiUtils::findNamedElement)
+            target?.let { resolvedSymbolInfo(project, it, requestedSymbolId) }
+        }
+
         return createJsonResult(
             MemberEditResult(
                 success = true,
                 file = prep.relativePath,
                 message = "Replaced ${member.kind} '${member.name}' entirely",
                 startLine = startLine,
-                endLine = endLine
+                endLine = endLine,
+                updatedSymbol = updatedSymbol
             )
         )
     }

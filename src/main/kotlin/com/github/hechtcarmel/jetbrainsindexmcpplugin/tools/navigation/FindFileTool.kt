@@ -5,7 +5,6 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScopeResolver
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileMatch
@@ -146,7 +145,7 @@ class FindFileTool : AbstractMcpTool() {
                 seenKeys = serializedResults.map { it.key }.toSet(),
                 searchExtender = searchExtender,
                 psiModCount = PsiModificationTracker.getInstance(project).modificationCount,
-                projectBasePath = ProjectResolver.normalizePath(project.basePath ?: ""),
+                project = project,
                 metadata = mapOf("query" to query)
             )
         }
