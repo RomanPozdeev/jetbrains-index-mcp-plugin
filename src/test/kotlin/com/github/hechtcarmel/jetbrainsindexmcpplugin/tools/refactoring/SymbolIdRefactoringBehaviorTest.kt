@@ -35,6 +35,39 @@ class SymbolIdRefactoringBehaviorTest : McpPlatformTestCase() {
         }
     }
 
+    fun testChangeSignatureByIdReturnsReboundMetadataAndUpdatesCaller() = runBlocking {
+        registerSourceRoot("signature-id-src")
+        val declaration = """
+            package signatureid;
+            class Service {
+                int calculate(int input) { return input; }
+            }
+        """.trimIndent()
+        writeProjectFile("signature-id-src/signatureid/Service.java", declaration)
+        writeProjectFile(
+            "signature-id-src/signatureid/Caller.java",
+            """
+            package signatureid;
+            class Caller {
+                int call(Service service) { return service.calculate(1); }
+            }
+            """.trimIndent()
+        )
+        val definition = definitionAt("signature-id-src/signatureid/Service.java", declaration, "calculate")
+
+        val result = ChangeSignatureTool().execute(project, buildJsonObject {
+            put("symbolId", definition.symbolId)
+            put("newName", "compute")
+        })
+        assertToolSucceeded("change_signature should accept symbolId", result)
+        val payload = json.parseToJsonElement(toolText(result)).jsonObject
+        val updated = json.decodeFromJsonElement<ResolvedSymbolInfo>(payload.getValue("updatedSymbol"))
+        assertEquals(definition.symbolId, updated.symbolId)
+        assertEquals("compute", updated.name)
+        assertRenamedInFile("signature-id-src/signatureid/Service.java", "calculate", "compute")
+        assertRenamedInFile("signature-id-src/signatureid/Caller.java", "calculate", "compute")
+    }
+
     fun testSafeDeleteByIdReturnsInvalidatedIdAndFurtherLookupsExpire() = runBlocking {
         registerSourceRoot("safe-delete-id-src")
         val source = """

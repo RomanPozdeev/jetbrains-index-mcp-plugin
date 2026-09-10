@@ -37,7 +37,7 @@ These tools work in every supported JetBrains IDE:
 | `ide_reformat_code` | Reformat code using project code style | Disabled |
 | `ide_optimize_imports` | Optimize imports without reformatting code | Disabled |
 | `ide_structural_search_replace` | Pattern-based code search and transformation (Java, Kotlin) | Disabled |
-| `ide_change_signature` | Change method signature with automatic caller updates (Java) | Disabled |
+| `ide_change_signature` | Change method signature with automatic caller updates (Java, Kotlin JVM functions) | Disabled |
 | `ide_create_file` | Create a new source file with content, immediately indexed by IntelliJ | Disabled |
 | `ide_replace_text_in_file` | Find and replace text using IntelliJ's Document API | Disabled |
 | `ide_edit_member` | Replace an entire member declaration (signature + body) with new content (Java, Kotlin) | Disabled |
@@ -2255,7 +2255,12 @@ Replace an entire member declaration (signature + body) with new content. The to
 
 Change a method's signature â€” name, return type, visibility, and parameters â€” with automatic updates to all callers using IntelliJ's Change Signature refactoring. Supports reordering, adding, removing, and renaming parameters.
 
-**Language:** Java.
+**Languages:** Java methods and Kotlin JVM functions.
+
+For Kotlin, use a source position or `symbolId`. Selecting an override starts the change at its
+base declaration so the interface, implementations, and callers are updated together. Preview
+identifies that base without rebinding the original override's handle; after apply,
+`updatedSymbol` describes the original handle's declaration when it remains available.
 
 **Use when:**
 - Adding a new parameter to a method and providing a default value for existing callers
@@ -2267,14 +2272,19 @@ Change a method's signature â€” name, return type, visibility, and parameters â€
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file containing the method, relative to project root |
-| `line` | integer | Yes | 1-based line number of the method |
-| `column` | integer | Yes | 1-based column number of the method name |
+| `target` | object | Conditional | Structured method selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | Conditional | Exact method handle. Omit `file`, `line`, and `column`. |
+| `file` | string | Conditional | Path to the file containing the method, relative to project root. Required for legacy position lookup. |
+| `line` | integer | Conditional | 1-based line number of the method for legacy position lookup. |
+| `column` | integer | Conditional | 1-based column number of the method name for legacy position lookup. |
+| `language` | string | Conditional | Legacy qualified-name selector language; requires `symbol` and is mutually exclusive with other target selectors. |
+| `symbol` | string | Conditional | Legacy qualified method name; requires `language` and is mutually exclusive with other target selectors. |
 | `newName` | string | No | New method name (unchanged if omitted) |
 | `newReturnType` | string | No | New return type (unchanged if omitted) |
 | `newVisibility` | string | No | New visibility: `"public"`, `"protected"`, `"private"`, or `"package-private"` (unchanged if omitted; `"package-local"` is accepted as a legacy alias) |
 | `newParameters` | array | No | Array of parameter objects defining the new parameter list. Each object: `{ oldIndex, name, type, defaultValue }`. Use `oldIndex: -1` for new parameters. |
 | `generateDelegate` | boolean | No | Generate a delegate method with the old signature that calls the new one (default: false) |
+| `dryRun` | boolean | No | Resolve and validate the method, discover callers/conflicts, and return a preview without changing or saving files (default: `false`) |
 
 **`newParameters` object fields:**
 
@@ -2283,7 +2293,7 @@ Change a method's signature â€” name, return type, visibility, and parameters â€
 | `oldIndex` | integer | Index in the original parameter list (0-based), or `-1` for a new parameter |
 | `name` | string | Parameter name |
 | `type` | string | Parameter type (e.g., `"String"`, `"int"`, `"List<String>"`) |
-| `defaultValue` | string | Default value expression used to update existing callers (required for new parameters) |
+| `defaultValue` | string | Argument expression for a new required parameter when callers or a generated delegate need it. Override-only changes need no default; trailing varargs may be empty. |
 
 **Example Request (add parameter):**
 
@@ -2323,6 +2333,33 @@ Change a method's signature â€” name, return type, visibility, and parameters â€
 }
 ```
 
+**Example Request (preview):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_change_signature",
+    "arguments": {
+      "target": { "symbolId": "sym_opaque-handle" },
+      "newName": "findUserById",
+      "newParameters": [
+        { "oldIndex": 0, "name": "id", "type": "String" },
+        { "oldIndex": -1, "name": "includeDeleted", "type": "boolean", "defaultValue": "false" }
+      ],
+      "dryRun": true
+    }
+  }
+}
+```
+
+The common preview response is described in [Refactoring Preview Contract](#refactoring-preview-contract).
+For change signature, `plannedChange` contains `operation: "changeSignature"`, the current
+signature in `before`, and the requested name/return type/visibility/parameters/delegate options in
+`requested`. `canApply` is false when discovery is incomplete, a target or affected file is
+read-only, or conflicts were found. Preview does not invoke the refactoring processor's write
+phase, save documents, or register undo.
+
 **Example Response:**
 
 ```json
@@ -2335,7 +2372,15 @@ Change a method's signature â€” name, return type, visibility, and parameters â€
     "src/main/java/com/example/UserController.java",
     "src/test/java/com/example/UserServiceTest.java"
   ],
-  "changesCount": 5
+  "changesCount": 5,
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUserById",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 

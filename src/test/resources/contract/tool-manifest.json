@@ -169,6 +169,7 @@ description:
   New parameters get a default value inserted at all call sites.
   
   Examples:
+  - By handle: {"symbolId": "<opaque-id>", "newName": "renamed"}
   - Add parameter: {"file": "src/Service.java", "line": 15, "column": 10, "newParameters": [{"oldIndex": 0, "name": "id", "type": "String"}, {"oldIndex": -1, "name": "validate", "type": "boolean", "defaultValue": "true"}]}
   - Change return type: {"file": "src/Service.java", "line": 15, "column": 10, "newReturnType": "Optional<User>"}
 schema:
@@ -180,15 +181,32 @@ schema:
         "description": "1-based column number",
         "type": "integer"
       },
+      "dryRun":
+      {
+        "description": "Resolve and validate the method, then discover usages/conflicts without modifying files. Default: false.",
+        "type": "boolean"
+      },
       "file":
       {
-        "description": "Path to file containing the method. REQUIRED.",
+        "description": "Path to file containing the method. Required with line+column; omit when symbolId is used.",
         "type": "string"
       },
       "generateDelegate":
       {
         "description": "Generate a delegation method with the old signature. Default: false.",
         "type": "boolean"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
+        "type": "string"
       },
       "line":
       {
@@ -223,14 +241,69 @@ schema:
       {
         "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
         "type": "string"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
-    "required":
-    [
-      "file",
-      "line",
-      "column"
-    ],
     "type": "object"
   }
 
