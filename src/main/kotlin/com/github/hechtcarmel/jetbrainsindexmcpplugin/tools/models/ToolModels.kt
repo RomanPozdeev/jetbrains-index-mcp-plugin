@@ -33,7 +33,11 @@ data class ResolvedSymbolInfo(
     val kind: String?,
     val container: String?,
     val file: String?,
-    val line: Int?
+    val line: Int?,
+    val column: Int? = null,
+    val qualifiedName: String? = null,
+    val language: String? = null,
+    val symbolId: String? = null
 )
 
 @Serializable
@@ -297,7 +301,9 @@ data class RefactoringResult(
     val changesCount: Int,
     val message: String,
     val warnings: List<String>? = null,
-    val unretargetedImporters: List<String>? = null
+    val unretargetedImporters: List<String>? = null,
+    val updatedSymbol: ResolvedSymbolInfo? = null,
+    val invalidatedSymbolId: String? = null
 )
 
 

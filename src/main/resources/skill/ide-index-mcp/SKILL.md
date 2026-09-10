@@ -208,3 +208,12 @@ variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "
 "column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
 Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
 Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
+
+### Rename preview
+
+`ide_refactor_rename` accepts `dryRun: true` with legacy selectors, `symbolId`, or a nested
+`target`. It returns `canApply`, `target`, `plannedChange`, `affectedFiles`, `usageCount`,
+`conflictCount`, `warnings` and `elapsedMs` without writing source or saving documents.
+Preview and apply share conflict discovery and automatic rename selections. A successful
+apply returns current `updatedSymbol` metadata. The preview response assembly is shared
+with subsequent refactoring preview implementations.

@@ -1,11 +1,16 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.McpPlatformTestCase
+import com.intellij.openapi.application.ReadAction
 import com.intellij.psi.PsiElement
 import com.intellij.util.containers.MultiMap
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class RenameSymbolToolBehaviorTest : McpPlatformTestCase() {
@@ -33,6 +38,7 @@ class RenameSymbolToolBehaviorTest : McpPlatformTestCase() {
     // ── Java: symbol rename ──
 
     fun testJavaRenameMethodUpdatesCallSitesWithinFile() = runBlocking {
+        registerSourceRoot("src")
         writeProjectFile(
             "src/UserService.java", """
             public class UserService {
@@ -59,7 +65,52 @@ class RenameSymbolToolBehaviorTest : McpPlatformTestCase() {
         assertFileContains("src/UserService.java", "return getFullName();")
     }
 
+    fun testRenameBaseDryRunDescribesAndBindsTheBaseMethod() = runBlocking {
+        registerSourceRoot("rename-base-preview-src")
+        writeProjectFile(
+            "rename-base-preview-src/previewbase/Base.java", """
+            package previewbase;
+
+            class Base {
+                void execute() {}
+            }
+            """.trimIndent()
+        )
+        writeProjectFile(
+            "rename-base-preview-src/previewbase/Child.java", """
+            package previewbase;
+
+            class Child extends Base {
+                @Override void execute() {}
+            }
+            """.trimIndent()
+        )
+
+        val result = RenameSymbolTool().execute(project, buildJsonObject {
+            put("file", "rename-base-preview-src/previewbase/Child.java")
+            put("targetType", "symbol")
+            put("line", 4)
+            put("column", 20)
+            put("newName", "run")
+            put("overrideStrategy", "rename_base")
+            put("dryRun", true)
+        })
+
+        assertToolSucceeded("rename_base preview should return a target", result)
+        val target = Json.parseToJsonElement(toolText(result)).jsonObject.getValue("target").jsonObject
+        assertEquals("execute", target.getValue("name").jsonPrimitive.content)
+        assertEquals("rename-base-preview-src/previewbase/Base.java", target.getValue("file").jsonPrimitive.content)
+
+        val resolved = ReadAction.compute<PsiElement, Throwable> {
+            SymbolIdRegistry.getInstance().resolve(project, target.getValue("symbolId").jsonPrimitive.content).getOrThrow()
+        }
+        assertEquals("Base.java", resolved.containingFile.name)
+        assertFileContains("rename-base-preview-src/previewbase/Base.java", "void execute()")
+        assertFileContains("rename-base-preview-src/previewbase/Child.java", "void execute()")
+    }
+
     fun testJavaRenameFieldUpdatesReferencesWithinFile() = runBlocking {
+        registerSourceRoot("src")
         writeProjectFile(
             "src/FieldRenameTarget.java", """
             public class FieldRenameTarget {

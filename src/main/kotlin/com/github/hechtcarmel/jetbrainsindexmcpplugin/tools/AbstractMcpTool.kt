@@ -1,5 +1,10 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools
 
+import com.intellij.usageView.UsageViewUtil
+import com.intellij.psi.PsiNamedElement
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiSourcePosition
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.OptimizedSymbolSearch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.toArgumentFailure
@@ -763,6 +768,29 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
     @RequiresReadLock
     protected fun bindExactSymbolId(project: Project, element: PsiElement, preferredId: String? = null): String =
         SymbolIdRegistry.getInstance().bind(project, element, preferredId)
+
+    /** Current declaration metadata shared by preview and apply. */
+    @RequiresReadLock
+    protected fun resolvedSymbolInfo(
+        project: Project,
+        element: PsiElement,
+        preferredId: String? = null
+    ): ResolvedSymbolInfo {
+        val target = PsiUtils.resolveNavigationTarget(element)
+        val position = PsiSourcePosition.position(project, target)
+        val qualifiedName = PsiUtils.qualifiedName(target)
+        return ResolvedSymbolInfo(
+            symbolId = bindSymbolId(project, target, preferredId),
+            name = (target as? PsiNamedElement)?.name,
+            kind = UsageViewUtil.getType(target).takeIf { it.isNotBlank() },
+            container = qualifiedName ?: PsiUtils.getAstPath(target).joinToString(".").ifEmpty { null },
+            file = target.containingFile?.virtualFile?.let { getRelativePath(project, it) },
+            line = position?.line,
+            column = position?.column,
+            qualifiedName = qualifiedName,
+            language = OptimizedSymbolSearch.getLanguageName(target)
+        )
+    }
 
     /**
      * Converts 1-based line/column to document offset.
