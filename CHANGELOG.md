@@ -8,6 +8,14 @@
 
 - `ide_find_definition` and `ide_symbol_info` return and accept opaque `symbolId` handles backed by exact PSI pointers. Handles survive line shifts and rename, expire on deletion/session reset/project close or cache eviction, and route to their owning open project. Cancellation does not expire a handle; pointer restoration does not hold shared cache locks. Preserve exact targets during definition/metadata lookup, expire handles after file replacement, and use source context for synthetic declarations without their own text.
 
+### Changed
+
+- Bind-host settings now validate syntax before resolver/bind checks and normalize IDN hostnames before persistence, binding, and restart. Malformed labels and host:port input stay invalid even with wildcard DNS, while unchanged legacy hostnames and scoped IPv6 values remain usable.
+
+### Fixed
+
+- Host-header protection now covers every configured bind host that resolves to loopback and accepts the standard loopback aliases plus that bind host's normalized spelling. Incoming `Host` values are never DNS-resolved.
+
 ## [5.9.6] - 2026-09-09
 
 ### Fixed

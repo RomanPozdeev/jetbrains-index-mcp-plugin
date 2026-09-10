@@ -14,6 +14,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.IOException
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
@@ -254,6 +256,29 @@ class KtorMcpServerHttpTest : BasePlatformTestCase() {
         assertEquals(HttpStatusCode.Forbidden.value, status)
     }
 
+    fun testLoopbackBindDoesNotResolveIncomingHostHeader() {
+        val status = sendRawPost(port = port, hostHeader = "127.0.0.2:$port")
+
+        assertEquals(HttpStatusCode.Forbidden.value, status)
+    }
+
+    fun testConfiguredLoopbackAliasIsAcceptedAsHostHeader() {
+        val (alias, aliasPort) = findBindableLoopbackAlias()
+        val aliasServer = createServer(aliasPort, host = alias)
+        assertEquals(KtorMcpServer.StartResult.Success, aliasServer.start())
+        try {
+            val status = sendRawPost(
+                port = aliasPort,
+                hostHeader = "$alias:$aliasPort",
+                connectHost = alias
+            )
+
+            assertEquals(HttpStatusCode.OK.value, status)
+        } finally {
+            aliasServer.stop()
+        }
+    }
+
     /**
      * The mirror image, and a regression guard: binding to 0.0.0.0 is a supported, warned-about
      * setting, and such a server is reached under whatever address routes to it. Enforcing the
@@ -287,7 +312,11 @@ class KtorMcpServerHttpTest : BasePlatformTestCase() {
      * Raw socket rather than [HttpClient]: `Host` is on the JDK client's restricted-header list and
      * is silently overwritten from the URI, so it cannot express this test at all.
      */
-    private fun sendRawPost(port: Int, hostHeader: String): Int {
+    private fun sendRawPost(
+        port: Int,
+        hostHeader: String,
+        connectHost: String = McpConstants.DEFAULT_SERVER_HOST
+    ): Int {
         val body = initializeRequestBody("2025-03-26")
         val request = buildString {
             append("POST ${McpConstants.STREAMABLE_HTTP_ENDPOINT_PATH} HTTP/1.1\r\n")
@@ -299,7 +328,7 @@ class KtorMcpServerHttpTest : BasePlatformTestCase() {
             append(body)
         }
 
-        Socket("127.0.0.1", port).use { socket ->
+        Socket(connectHost, port).use { socket ->
             socket.getOutputStream().write(request.toByteArray())
             socket.getOutputStream().flush()
             val statusLine = socket.getInputStream().bufferedReader().readLine()
@@ -351,4 +380,18 @@ class KtorMcpServerHttpTest : BasePlatformTestCase() {
     """.trimIndent()
 
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
+
+    private fun findBindableLoopbackAlias(): Pair<String, Int> {
+        // Linux exposes the whole 127/8 range, while macOS commonly exposes only 127.0.0.1.
+        // The leading-zero spelling resolves to the same loopback address and exercises the
+        // identical invariant: the configured spelling must be accepted without resolving Host.
+        for (host in listOf("127.0.0.2", "127.000.000.001")) {
+            try {
+                return ServerSocket(0, 1, InetAddress.getByName(host)).use { host to it.localPort }
+            } catch (_: IOException) {
+                // Try the next non-standard loopback spelling.
+            }
+        }
+        error("No non-standard loopback spelling is bindable on this platform")
+    }
 }
