@@ -591,3 +591,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 Plugin based on the [IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template).
+
+### Symbol handles for definition and symbol info
+
+`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
+coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
+When `project_path` is omitted, the handle identifies its owning open project. Handles expire
+on server restart, project close, deletion, one hour of inactivity, or eviction from the
+4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
+different IDs can identify the same declaration, so do not compare IDs for symbol equality.

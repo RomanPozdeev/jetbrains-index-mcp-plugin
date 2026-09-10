@@ -191,3 +191,12 @@ See [claude-code-hooks.md](https://github.com/hechtcarmel/jetbrains-index-mcp-pl
 ## Detailed Tool Parameters
 
 For complete parameter reference with types, defaults, and return formats, see [tools-reference.md](references/tools-reference.md).
+
+### Symbol handles for definition and symbol info
+
+`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
+coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
+When `project_path` is omitted, the handle identifies its owning open project. Handles expire
+on server restart, project close, deletion, one hour of inactivity, or eviction from the
+4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
+different IDs can identify the same declaration, so do not compare IDs for symbol equality.

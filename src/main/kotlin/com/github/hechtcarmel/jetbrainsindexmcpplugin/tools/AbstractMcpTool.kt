@@ -7,6 +7,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.exceptions.IndexNotReadyEx
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobMatcher
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
@@ -525,6 +526,7 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         MISSING,
         POSITION,
         SYMBOL,
+        SYMBOL_ID,
         CONFLICT
     }
 
@@ -556,6 +558,7 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
      * client/schema placeholder and must not conflict with a complete position lookup.
      */
     protected fun resolveLookupMode(arguments: JsonObject): LookupModeState {
+        val hasSymbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID) != null
         val hasLanguage = optionalStringArg(arguments, ParamNames.LANGUAGE) != null
         val hasSymbol = optionalStringArg(arguments, ParamNames.SYMBOL) != null
         val hasAnySymbol = hasLanguage || hasSymbol
@@ -567,6 +570,8 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         val hasCompletePosition = hasFile && hasLine && hasColumn
 
         return when {
+            hasSymbolId && (hasAnySymbol || hasAnyPosition) -> LookupModeState.CONFLICT
+            hasSymbolId -> LookupModeState.SYMBOL_ID
             hasCompleteSymbol && hasAnyPosition -> LookupModeState.CONFLICT
             hasCompletePosition -> LookupModeState.POSITION
             hasAnySymbol -> LookupModeState.SYMBOL
@@ -685,6 +690,7 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         arguments: JsonObject,
         allowLibraryFilesForPosition: Boolean = false
     ): Result<PsiElement> {
+        val symbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID)
         val language = optionalStringArg(arguments, ParamNames.LANGUAGE)
         val symbol = optionalStringArg(arguments, ParamNames.SYMBOL)
         val file = optionalStringArg(arguments, ParamNames.FILE)
@@ -692,7 +698,13 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         val column = arguments[ParamNames.COLUMN]?.jsonPrimitive?.int
 
         return when (resolveLookupMode(arguments)) {
-            LookupModeState.CONFLICT -> ErrorMessages.SYMBOL_AND_POSITION_EXCLUSIVE.toArgumentFailure()
+            LookupModeState.CONFLICT -> {
+                if (symbolId != null) ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE.toArgumentFailure()
+                else ErrorMessages.SYMBOL_AND_POSITION_EXCLUSIVE.toArgumentFailure()
+            }
+
+            LookupModeState.SYMBOL_ID ->
+                SymbolIdRegistry.getInstance().resolve(project, symbolId!!)
 
             LookupModeState.SYMBOL -> {
                 if (language == null) return ErrorMessages.missingParamForSymbol(ParamNames.LANGUAGE).toArgumentFailure()
@@ -724,6 +736,22 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
             LookupModeState.MISSING -> ErrorMessages.SYMBOL_OR_POSITION_REQUIRED.toArgumentFailure()
         }
     }
+
+    /** Binds the exact navigation PSI; reuse a live preferred handle after edits. */
+    @RequiresReadLock
+    protected fun bindSymbolId(
+        project: Project,
+        element: PsiElement,
+        preferredId: String? = null
+    ): String {
+        val navigationTarget = PsiUtils.resolveNavigationTarget(element)
+        return bindExactSymbolId(project, navigationTarget, preferredId)
+    }
+
+    /** Preserve an already resolved handle's PSI identity, including non-named and light elements. */
+    @RequiresReadLock
+    protected fun bindExactSymbolId(project: Project, element: PsiElement, preferredId: String? = null): String =
+        SymbolIdRegistry.getInstance().bind(project, element, preferredId)
 
     /**
      * Converts 1-based line/column to document offset.

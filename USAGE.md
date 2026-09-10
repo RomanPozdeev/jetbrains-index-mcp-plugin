@@ -177,6 +177,14 @@ Most tools operate on a specific location in code and require these parameters:
 | `line` | integer | 1-based line number |
 | `column` | integer | 1-based column number. For dotted expressions like `json.dumps()` or `os.path.join()`, point to the member token (`dumps`, `join`) when targeting the member definition. |
 
+### Opaque Symbol IDs
+
+`ide_find_definition` and `ide_symbol_info` accept and return opaque handles tied to the exact
+PSI target and its original file identity. Lookups preserve that target, including non-named and
+synthetic elements; declarations without their own source text use a source-context preview.
+Deleting and recreating a file at the same path expires its old handles. Rediscover the target
+when a lookup returns `SYMBOL_ID_EXPIRED`.
+
 ### Symbol Reference Parameters
 
 Some tools support identifying the target element by fully qualified symbol reference instead of file position. The following parameters are available as an alternative to `file` + `line` + `column`:
@@ -3458,3 +3466,12 @@ Add a directory as an IntelliJ module with a content root, enabling code intelli
 ---
 
 **Related window-management tools:** `ide_set_power_save_mode`, `ide_close_project`, and `ide_open_project` are documented under [Project Window Management](#project-window-management); `ide_install_plugin` and `ide_restart` under [Plugin Development](#plugin-development).
+
+### Symbol handles for definition and symbol info
+
+`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
+coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
+When `project_path` is omitted, the handle identifies its owning open project. Handles expire
+on server restart, project close, deletion, one hour of inactivity, or eviction from the
+4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
+different IDs can identify the same declaration, so do not compare IDs for symbol equality.

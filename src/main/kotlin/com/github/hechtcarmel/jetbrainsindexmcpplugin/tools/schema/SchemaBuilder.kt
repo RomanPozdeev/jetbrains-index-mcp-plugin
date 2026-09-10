@@ -68,6 +68,17 @@ class SchemaBuilder private constructor() {
         }
     }
 
+    fun symbolId() = apply {
+        properties[ParamNames.SYMBOL_ID] = buildJsonObject {
+            put(SchemaConstants.TYPE, SchemaConstants.TYPE_STRING)
+            put(
+                SchemaConstants.DESCRIPTION,
+                "Reusable across edits/rename; expires with session, project, inactivity or eviction. " +
+                    "Non-canonical: unequal handles may identify the same symbol."
+            )
+        }
+    }
+
     fun stringProperty(name: String, description: String, required: Boolean = false) = apply {
         properties[name] = buildJsonObject {
             put(SchemaConstants.TYPE, SchemaConstants.TYPE_STRING)
