@@ -23,6 +23,8 @@ object ErrorMessages {
         "Cannot specify both language+symbol and file+line+column. Use one or the other."
     const val SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE =
         "Cannot specify symbolId together with another target selector. Use symbolId by itself."
+    const val LANGUAGE_SYMBOL_AND_OTHER_TARGET_EXCLUSIVE =
+        "Cannot specify language+symbol together with another target selector. Use language+symbol by itself."
     const val SYMBOL_OR_POSITION_REQUIRED =
         "Must specify file+line+column or language+symbol to identify the target element."
     const val SYMBOL_ID_OR_SYMBOL_OR_POSITION_REQUIRED =

@@ -67,6 +67,25 @@ internal object RefactoringScopeGuard {
         }
     }
 
+    /**
+     * Preview variant of [computeUsagesOffEdt]. Cancellation and discovery failures propagate:
+     * a dry-run must never turn an incomplete search into an apparently safe zero-usage plan.
+     */
+    fun computeUsagesOffEdtStrict(project: Project, findUsages: () -> Array<UsageInfo>): Array<UsageInfo> {
+        if (!ApplicationManager.getApplication().isDispatchThread) {
+            return ReadAction.compute<Array<UsageInfo>, RuntimeException> { findUsages() }
+        }
+        val search = ThrowableComputable<Array<UsageInfo>, RuntimeException> {
+            ReadAction.compute<Array<UsageInfo>, RuntimeException> { findUsages() }
+        }
+        return ProgressManager.getInstance().runProcessWithProgressSynchronously(
+            search,
+            RefactoringBundle.message("progress.text"),
+            true,
+            project
+        )
+    }
+
     /** Relative paths of read-only files among the usages' containing files. */
     fun readOnlyFilesIn(project: Project, usages: Array<UsageInfo>): List<String> =
         usages.asSequence()

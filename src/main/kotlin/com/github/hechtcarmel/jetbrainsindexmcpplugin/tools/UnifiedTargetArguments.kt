@@ -19,6 +19,8 @@ internal object UnifiedTargetArguments {
     const val TARGET = "target"
     const val POSITION = "position"
     const val QUALIFIED_NAME = "qualifiedName"
+    /** Internal provenance retained after flattening when a tool must distinguish nested intent. */
+    const val NORMALIZED_VARIANT = "__unifiedTargetVariant"
 
     private val legacySelectorNames = listOf(
         ParamNames.SYMBOL_ID,
@@ -82,6 +84,7 @@ internal object UnifiedTargetArguments {
                 val symbolId = requiredNonBlankString(target[ParamNames.SYMBOL_ID], "target.symbolId")
                     .getOrElse { return Result.failure(it) }
                 normalized[ParamNames.SYMBOL_ID] = JsonPrimitive(symbolId)
+                normalized[NORMALIZED_VARIANT] = JsonPrimitive(ParamNames.SYMBOL_ID)
             }
 
             hasPosition -> {
@@ -107,6 +110,7 @@ internal object UnifiedTargetArguments {
                 normalized[ParamNames.FILE] = JsonPrimitive(file)
                 normalized[ParamNames.LINE] = JsonPrimitive(line)
                 normalized[ParamNames.COLUMN] = JsonPrimitive(column)
+                normalized[NORMALIZED_VARIANT] = JsonPrimitive(POSITION)
             }
 
             else -> {
@@ -118,6 +122,7 @@ internal object UnifiedTargetArguments {
                     .getOrElse { return Result.failure(it) }
                 normalized[ParamNames.SYMBOL] = JsonPrimitive(qualifiedName)
                 normalized[ParamNames.LANGUAGE] = JsonPrimitive(language)
+                normalized[NORMALIZED_VARIANT] = JsonPrimitive(QUALIFIED_NAME)
             }
         }
 

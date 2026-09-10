@@ -292,7 +292,7 @@ These tools work in all supported JetBrains IDEs.
 | `ide_open_project` | Open a project by absolute path and wait until indexing completes (configurable timeout); returns immediately if already open *(disabled by default)* |
 | `ide_install_plugin` | Install a plugin zip into the IDE, replacing any existing version — auto-detects `build/distributions/*.zip` when no path is given *(disabled by default)* |
 | `ide_restart` | Restart the IDE — terminates the MCP connection; call after `ide_install_plugin` *(disabled by default)* |
-| `ide_refactor_rename` | Rename a symbol or file and update all references across the project (all languages; use `targetType` for explicit file mode) |
+| `ide_refactor_rename` | Preview with `dryRun`, or rename a symbol by `symbolId`/position (or a file) and update all references across the project (all languages; use `targetType` for explicit file mode) |
 | `ide_move_file` | Move a file to a new directory, applying language-aware reference/package updates when the IDE provides a semantic move backend |
 | `ide_reformat_code` | Reformat code using project code style with import optimization *(disabled by default)* |
 | `ide_optimize_imports` | Optimize imports without reformatting code *(disabled by default)* |
@@ -326,7 +326,8 @@ PHP file structure support requires the PHP plugin and is available in PhpStorm 
 | `ide_convert_java_to_kotlin` | Convert Java files to Kotlin using IntelliJ's built-in converter *(disabled by default, requires Java + Kotlin plugins)* |
 | `ide_refactor_safe_delete` | Safely delete an element, checking for usages first (Java/Kotlin only) |
 
-> **Note**: Refactoring tools modify source files. All changes support undo via <kbd>Ctrl/Cmd+Z</kbd>.
+> **Note**: Applied refactorings modify source files and support undo via
+> <kbd>Ctrl/Cmd+Z</kbd>. `dryRun: true` previews do not modify files or create an undo command.
 
 ### Project Lifecycle Management Tools
 

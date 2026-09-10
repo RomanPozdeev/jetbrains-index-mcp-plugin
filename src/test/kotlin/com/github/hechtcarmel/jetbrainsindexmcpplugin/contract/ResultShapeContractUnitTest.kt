@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.contract
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.RefactoringPreviewResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.UsageTypes
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ActiveFileInfo
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.BuildMessage
@@ -478,6 +479,17 @@ class ResultShapeContractUnitTest : TestCase() {
             column = 17,
             language = "JAVA"
         )
+        val updatedSymbol = ResolvedSymbolInfo(
+            symbolId = "sym_updated",
+            name = "process",
+            kind = "method",
+            container = "com.example.Service",
+            file = "src/main/java/com/example/Service.java",
+            line = 43,
+            column = 17,
+            qualifiedName = "com.example.Service#process",
+            language = "JAVA"
+        )
         val usageInfo = UsageInfo(
             file = "src/main/java/com/example/Caller.java",
             line = 8,
@@ -555,6 +567,7 @@ class ResultShapeContractUnitTest : TestCase() {
                     totalIsExact = false
                 )
             ),
+            struct(ResolvedSymbolInfo.serializer(), updatedSymbol),
             struct(
                 DefinitionResult.serializer(),
                 DefinitionResult(
@@ -708,7 +721,24 @@ class ResultShapeContractUnitTest : TestCase() {
                     changesCount = 3,
                     message = "Renamed 'handle' to 'process'",
                     warnings = listOf("1 usage in a comment was not updated"),
-                    unretargetedImporters = listOf("src/main/java/com/example/Caller.java")
+                    unretargetedImporters = listOf("src/main/java/com/example/Caller.java"),
+                    updatedSymbol = updatedSymbol
+                )
+            ),
+            struct(
+                RefactoringPreviewResult.serializer(),
+                RefactoringPreviewResult(
+                    dryRun = true,
+                    canApply = true,
+                    target = updatedSymbol,
+                    plannedChange = JsonObject(
+                        mapOf("newName" to JsonPrimitive("process"))
+                    ),
+                    affectedFiles = listOf("src/main/java/com/example/Service.java"),
+                    usageCount = 3,
+                    conflictCount = 1,
+                    warnings = listOf("1 usage in a comment would not be updated"),
+                    elapsedMs = 31L
                 )
             ),
             struct(

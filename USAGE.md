@@ -199,6 +199,51 @@ variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "
 Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
 Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
 
+### Refactoring Preview Contract
+
+`ide_refactor_rename` accepts `dryRun: true`. The request follows normal target resolution,
+validation, usage discovery, and conflict discovery, but does not enter the refactoring/source-write
+phase, save documents, or create an undo command. File contents therefore remain byte-for-byte
+unchanged.
+
+Rename previews return this top-level shape:
+
+```json
+{
+  "dryRun": true,
+  "canApply": true,
+  "target": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "kind": "method",
+    "container": "com.example.UserService",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "qualifiedName": "com.example.UserService#findUser",
+    "language": "Java"
+  },
+  "plannedChange": {
+    "operation": "rename",
+    "targetType": "symbol",
+    "from": "findUser",
+    "to": "findUserById",
+    "overrideStrategy": "rename_base",
+    "relatedRenamingStrategy": "all"
+  },
+  "affectedFiles": ["src/main/java/com/example/UserService.java"],
+  "usageCount": 4,
+  "conflictCount": 0,
+  "warnings": [],
+  "elapsedMs": 18
+}
+```
+
+`canApply: false` means discovery found a blocker or could not finish; inspect `warnings` and
+`conflictCount`. `affectedFiles` is an estimate from the preview search. To apply, send the same
+operation again with `dryRun` omitted or `false`; a preview is not an apply token and does not
+reserve project state.
+
 ### Symbol Reference Parameters
 
 Some tools support identifying the target element by fully qualified symbol reference instead of file position. The following parameters are available as an alternative to `file` + `line` + `column`:
@@ -1910,7 +1955,9 @@ Renames a symbol or file and updates all references across the project. This too
 - **Automatic related element renaming** - getters/setters, overriding methods, test classes are renamed automatically
 - Explicit `targetType` mode selection (`symbol` or `file`)
 - Conflict detection before rename execution (returns error instead of showing dialog)
+- Read-only preview with usage/conflict discovery (`dryRun: true`)
 - Supports IDE undo for rename changes
+- Constructor rename previews target the containing class and include its type usages; file collisions include existing directories.
 
 **Use when:**
 - Renaming identifiers to improve code clarity
@@ -1921,13 +1968,55 @@ Renames a symbol or file and updates all references across the project. This too
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file containing the symbol |
+| `target` | object | Conditional | Structured symbol selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | Conditional | Exact symbol handle. Omit `file`, `line`, and `column`; `targetType` may be omitted or set to `symbol`. |
+| `file` | string | Conditional | Path to the file containing the symbol, or the file to rename. Required for legacy position-based symbol lookup and file rename. |
+| `language` | string | Conditional | Legacy qualified-name selector language; requires `symbol` and is mutually exclusive with other target selectors. |
+| `symbol` | string | Conditional | Legacy qualified symbol name; requires `language` and is mutually exclusive with other target selectors. |
 | `targetType` | string | No | `symbol` (requires 1-based `line` + `column`) or `file` (renames the file itself; placeholder coordinates are ignored) |
 | `line` | integer | No | 1-based line number for symbol rename |
 | `column` | integer | No | 1-based column number for symbol rename |
 | `newName` | string | Yes | The new name for the symbol |
 | `overrideStrategy` | string | No | How to handle overriding methods: `"rename_base"` (default), `"rename_only_current"`, or `"ask"` |
 | `relatedRenamingStrategy` | string | No | How to handle automatic renaming of related symbols: `"all"` (default), `"none"`, `"accessors_and_tests"`, or `"ask"` |
+| `dryRun` | boolean | No | Resolve and validate the target, discover usages/conflicts, and return a preview without changing or saving files (default: `false`) |
+
+**Example Request (symbolId):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_rename",
+    "arguments": {
+      "symbolId": "sym_opaque-handle",
+      "newName": "findUserById"
+    }
+  }
+}
+```
+
+**Example Request (preview):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_rename",
+    "arguments": {
+      "target": { "symbolId": "sym_opaque-handle" },
+      "newName": "findUserById",
+      "dryRun": true
+    }
+  }
+}
+```
+
+The common preview response is described in [Refactoring Preview Contract](#refactoring-preview-contract).
+For rename, `plannedChange` contains `operation: "rename"`, `targetType`, `from`, `to`,
+`overrideStrategy`, and `relatedRenamingStrategy`. `canApply` is false when discovery is incomplete,
+the target/scope is read-only, an interactive-only plan cannot be represented exactly, or conflicts
+were found. The preview performs no refactoring/source write, document save, or undo registration.
 
 **Example Request (Java):**
 
@@ -1991,7 +2080,15 @@ Renames a symbol or file and updates all references across the project. This too
     "src/test/java/com/example/UserServiceTest.java"
   ],
   "changesCount": 3,
-  "message": "Successfully renamed 'findUser' to 'findUserById' (also renamed 2 related element(s))"
+  "message": "Successfully renamed 'findUser' to 'findUserById' (also renamed 2 related element(s))",
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUserById",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 

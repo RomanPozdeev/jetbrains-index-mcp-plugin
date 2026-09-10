@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ide_refactor_rename` supports non-mutating `dryRun` previews and exact/nested symbol targets. Preview and apply share automatic rename selections and report affected declarations and usages consistently. Preview never enters the source-write phase or saves unrelated documents. Detect destination collisions when a Java class rename also renames its file, and refuse JS/TS preparation that requires an interactive choice. Include implicit class-file and directory collisions, and preview a constructor rename as the containing class rename.
+
+### Fixed
+
+- **Kotlin override renames honor `rename_base` without a chooser** — `ide_refactor_rename` resolves the base through the Kotlin light-method API off the EDT, then renames the source declaration, its overrides, and call sites. This also applies to the default strategy. Failed base discovery aborts before editing instead of opening the IDE chooser; explicit `ask` remains interactive.
+
 ## [5.11.0] - 2026-09-14
 
 ### Added
