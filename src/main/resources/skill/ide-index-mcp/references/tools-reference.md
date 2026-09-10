@@ -13,6 +13,10 @@ Complete parameter reference for all IDE MCP tools. All tools use JSON-RPC via M
 | `language` | string | Language of the symbol (e.g., `"Java"`, `"PHP"`). Required when using `symbol`. |
 | `symbol` | string | Fully qualified symbol reference. Java format: `com.example.ClassName`, `com.example.ClassName#memberName`. PHP format: `\\App\\Service\\UserService`, `\\App\\Service\\UserService::method()`, `\\App\\Service\\UserService::CONSTANT`, `\\App\\Service\\UserService::$property`, `\\App\\Service\\StatusEnum::ACTIVE`. PHP properties require the `$property` form; plain `::name` resolves enum cases (on enum types), constants, or methods. Python format: see **Python symbol grammar** below. |
 
+**Handle identity:** Definition and metadata lookups preserve the exact stored PSI target.
+Declarations without their own source text use a source-context preview. Deleting and recreating
+a file at the same path expires its old handles; rediscover it after `SYMBOL_ID_EXPIRED`.
+
 **Symbol reference:** Some tools accept `language` + `symbol` as an alternative to `file` + `line` + `column`. The two groups are **mutually exclusive**. Supported languages: Java, PHP, JavaScript, TypeScript, Python. Unsupported languages are rejected explicitly; use `file` + `line` + `column` for other languages.
 
 **Python symbol grammar:** Symbols must be module-qualified (dotted path with ≥2 segments):
@@ -84,10 +88,11 @@ Find all usages of a symbol (semantic, not text search).
 ### ide_find_definition
 Go to where a symbol is defined.
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Opaque handle returned by this tool or `ide_symbol_info`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column. Required for position-based lookup. |
@@ -97,7 +102,7 @@ Go to where a symbol is defined.
 | `maxPreviewLines` | integer | no | Max lines for full preview (default 50, max 500) |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ file, line, column, preview, symbolName, astPath }`
+**Returns**: `{ symbolId, file, line, column, preview, symbolName, astPath }`
 Handles: packages, compiled classes, library sources (jar: URLs).
 
 ### ide_symbol_info (disabled by default)
@@ -105,10 +110,11 @@ Resolved signature and documentation of the symbol at a position — the declara
 `ide_find_definition` cannot give, because its preview is source text with unresolved short type
 names and no doc comment.
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Opaque handle returned by this tool or `ide_find_definition`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column. Required for position-based lookup. |
@@ -118,7 +124,12 @@ names and no doc comment.
 | `maxDocLength` | integer | no | Truncate documentation beyond this many characters. Default 4000, max 20000 |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ name, kind, qualifiedName, signature, signatureSource, parameters: [{name, type}], returnType, typeParameters, thrownTypes, modifiers, visibility, containingDeclaration, documentation, documentationTruncated, file, line, column, language }`
+**Returns**: `{ symbolId, name, kind, qualifiedName, signature, signatureSource, parameters: [{name, type}], returnType, typeParameters, thrownTypes, modifiers, visibility, containingDeclaration, documentation, documentationTruncated, file, line, column, language }`
+
+For both tools, omitting `project_path` lets `symbolId` route to its owning open project. Handles
+expire on server restart, project close, deletion, one hour of inactivity, or LRU eviction;
+self-navigating synthetic targets also expire after their backing source file changes. Rediscover
+after `SYMBOL_ID_EXPIRED`. Handles are non-canonical and must not be compared for equality.
 
 **Type resolution**: `signatureSource` says how far the types were resolved.
 - `java_psi` — Java declarations. Parameter and return types are fully qualified

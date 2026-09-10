@@ -668,6 +668,7 @@ description:
   Returns: file path, line/column of definition, code preview, and symbol name.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -724,6 +725,11 @@ schema:
       "symbol":
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
         "type": "string"
       }
     },
@@ -2683,6 +2689,7 @@ description:
   Prefer this over ide_find_definition + reading the file when you only need the signature or the docs.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup, so overloads are addressable
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -2738,6 +2745,11 @@ schema:
       "symbol":
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
         "type": "string"
       }
     },

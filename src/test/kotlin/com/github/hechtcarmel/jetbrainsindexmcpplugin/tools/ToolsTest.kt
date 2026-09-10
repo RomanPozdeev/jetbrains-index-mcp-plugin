@@ -218,7 +218,10 @@ class ToolsTest : McpPlatformTestCase() {
 
         val result = tool.execute(project, buildJsonObject { })
         assertTrue("Should error with missing params", result.isFailure)
-        assertTrue("Should mention required params", errorText(result).contains(ErrorMessages.SYMBOL_OR_POSITION_REQUIRED))
+        assertTrue(
+            "Should mention required params",
+            errorText(result).contains(ErrorMessages.SYMBOL_ID_OR_SYMBOL_OR_POSITION_REQUIRED)
+        )
     }
 
     fun testFindDefinitionToolPartialPosition() = runBlocking {

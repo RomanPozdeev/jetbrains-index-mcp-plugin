@@ -177,6 +177,20 @@ Most tools operate on a specific location in code and require these parameters:
 | `line` | integer | 1-based line number |
 | `column` | integer | 1-based column number. For dotted expressions like `json.dumps()` or `os.path.join()`, point to the member token (`dumps`, `join`) when targeting the member definition. |
 
+### Opaque Symbol IDs
+
+`ide_find_definition` and `ide_symbol_info` accept and return opaque handles tied to the exact
+PSI target and its original file identity. Lookups preserve that target, including non-named and
+synthetic elements; declarations without their own source text use a source-context preview.
+Pass `symbolId` alone instead of coordinates or `language` + `symbol`; when `project_path` is
+omitted, the handle routes the request to its owning open project. Handles are non-canonical, so
+different IDs may identify the same declaration and must not be compared for symbol equality.
+They expire on server restart, project close, declaration/file deletion, one hour of inactivity,
+or eviction from the 4,096-entry cache. Self-navigating synthetic PSI targets (such as implicit
+enum methods) also expire after their backing source file changes because a hard pointer cannot
+prove that the exact synthetic declaration survived the edit. Rediscover the target after
+`SYMBOL_ID_EXPIRED`.
+
 ### Symbol Reference Parameters
 
 Some tools support identifying the target element by fully qualified symbol reference instead of file position. The following parameters are available as an alternative to `file` + `line` + `column`:
@@ -229,7 +243,7 @@ Parameter lists are not supported (Python has no overload-by-signature); bare un
 
 **Note:** Module-qualified lookup remains v1 grammar and bounded; unsupported cases should fall back to `file` + `line` + `column`.
 
-**Tools that support symbol references:** `ide_find_references`, `ide_find_definition`, `ide_call_hierarchy`, `ide_find_implementations`, `ide_find_super_methods`.
+**Tools that support symbol references:** `ide_find_references`, `ide_find_definition`, `ide_symbol_info`, `ide_call_hierarchy`, `ide_find_implementations`, `ide_find_super_methods`.
 
 ---
 
@@ -347,12 +361,13 @@ Finds the definition/declaration location of a symbol at a given source location
 - Understanding where a method, class, variable, or field is declared
 - Looking up the original definition from a usage site
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Opaque handle returned by this tool or `ide_symbol_info`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -396,6 +411,7 @@ Finds the definition/declaration location of a symbol at a given source location
 
 ```json
 {
+  "symbolId": "sym_4LWQhYb7xR6Fv8nJ3p2t",
   "file": "src/main/java/com/example/UserService.java",
   "line": 15,
   "column": 17,
@@ -431,12 +447,13 @@ types as the IDE resolved them.
 | `quick_navigation` | Any language with a documentation provider — Kotlin, Python, JS/TS, Go, PHP, Rust | As that language's Quick Documentation renders them; often short |
 | `element_text` | No documentation provider answered | The declaration's own source line |
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Opaque handle returned by this tool or `ide_find_definition`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -466,6 +483,7 @@ types as the IDE resolved them.
 
 ```json
 {
+  "symbolId": "sym_4LWQhYb7xR6Fv8nJ3p2t",
   "name": "findUser",
   "kind": "method",
   "qualifiedName": "com.example.UserService#findUser(java.lang.String)",
