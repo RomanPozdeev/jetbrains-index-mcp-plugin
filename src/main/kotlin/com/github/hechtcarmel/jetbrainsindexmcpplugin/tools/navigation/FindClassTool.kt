@@ -7,7 +7,6 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScop
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FindClassResult
@@ -15,6 +14,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.SymbolMatch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiUtils
 import com.intellij.navigation.ChooseByNameContributor
 import com.intellij.navigation.ChooseByNameContributorEx
 import com.intellij.navigation.NavigationItem
@@ -24,7 +24,7 @@ import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
-import com.intellij.psi.PsiNamedElement
+import com.intellij.psi.SmartPointerManager
 import com.intellij.psi.codeStyle.MinusculeMatcher
 import com.intellij.psi.codeStyle.NameUtil
 import com.intellij.psi.search.GlobalSearchScope
@@ -149,7 +149,10 @@ class FindClassTool : AbstractMcpTool() {
             val serializedResults = sortedClasses.map { cls ->
                 PaginationService.SerializedResult(
                     key = "${cls.file}:${cls.line}:${cls.column}:${cls.name}",
-                    data = json.encodeToJsonElement(cls)
+                    data = json.encodeToJsonElement(cls),
+                    symbolPointer = cls.pointerTarget?.let {
+                        SmartPointerManager.getInstance(project).createSmartPsiElementPointer(it)
+                    }
                 )
             }
 
@@ -160,7 +163,7 @@ class FindClassTool : AbstractMcpTool() {
                 seenKeys = serializedResults.map { it.key }.toSet(),
                 searchExtender = searchExtender,
                 psiModCount = PsiModificationTracker.getInstance(project).modificationCount,
-                projectBasePath = ProjectResolver.normalizePath(project.basePath ?: ""),
+                project = project,
                 metadata = mapOf("query" to query)
             )
         }
@@ -209,7 +212,10 @@ class FindClassTool : AbstractMcpTool() {
             .map { cls ->
                 PaginationService.SerializedResult(
                     key = "${cls.file}:${cls.line}:${cls.column}:${cls.name}",
-                    data = json.encodeToJsonElement(cls)
+                    data = json.encodeToJsonElement(cls),
+                    symbolPointer = cls.pointerTarget?.let {
+                        SmartPointerManager.getInstance(project).createSmartPsiElementPointer(it)
+                    }
                 )
             }
     }
@@ -346,30 +352,16 @@ class FindClassTool : AbstractMcpTool() {
         if (!scope.contains(file)) return null
         val relativePath = ProjectUtils.getToolFilePath(project, file)
 
-        val name = when (targetElement) {
-            is PsiNamedElement -> targetElement.name
-            else -> {
-                try {
-                    val method = targetElement.javaClass.getMethod("getName")
-                    method.invoke(targetElement) as? String
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        } ?: return null
+        val name = PsiUtils.classDisplayName(project, targetElement) ?: return null
 
-        val qualifiedName = try {
-            val method = targetElement.javaClass.getMethod("getQualifiedName")
-            method.invoke(targetElement) as? String
-        } catch (e: Exception) {
-            null
-        }
+        val qualifiedName = PsiUtils.qualifiedName(targetElement)
 
         val line = getLineNumber(project, targetElement) ?: 1
         val kind = determineKind(targetElement)
         val language = getLanguageName(targetElement)
 
         return SymbolMatch(
+            symbolId = PaginationService.UNMATERIALIZED_SYMBOL_ID,
             name = name,
             qualifiedName = qualifiedName,
             kind = kind,
@@ -377,7 +369,8 @@ class FindClassTool : AbstractMcpTool() {
             line = line,
             column = getColumnNumber(project, targetElement) ?: 1,
             containerName = null,
-            language = language
+            language = language,
+            pointerTarget = targetElement
         )
     }
 
@@ -410,6 +403,8 @@ class FindClassTool : AbstractMcpTool() {
     }
 
     private fun determineKind(element: PsiElement): String {
+        PsiUtils.kotlinClassKind(element)?.let { return it }
+
         fun probe(methodName: String): Boolean = try {
             element.javaClass.getMethod(methodName).invoke(element) == true
         } catch (_: Exception) {

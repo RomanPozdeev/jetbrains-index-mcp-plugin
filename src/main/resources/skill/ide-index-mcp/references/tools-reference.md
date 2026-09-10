@@ -63,10 +63,11 @@ Parse the `text` field as JSON for structured data.
 ### ide_find_references
 Find all usages of a symbol (semantic, not text search).
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Exact declaration handle from a previous result. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column. Required for position-based lookup. |
@@ -82,7 +83,7 @@ Find all usages of a symbol (semantic, not text search).
 
 **Returns**: `{ usages: [{ file, line, column, context, type, astPath }], totalCount, totalIsExact, resolvedSymbol, truncated, nextCursor?, hasMore, totalCollected, offset, pageSize, stale }`
 **Pagination note**: `truncated` mirrors `hasMore`; when `hasMore` is `true`, pass `nextCursor` to fetch the next page.
-**Resolution note**: `resolvedSymbol` echoes the declaration that was actually searched — positions on comments or whitespace snap to the nearest enclosing named element, so check it matches the symbol you intended. When `totalIsExact` is `false`, `totalCount` is a lower bound.
+**Resolution note**: `resolvedSymbol` includes `symbolId` and echoes the declaration that was actually searched — positions on comments or whitespace snap to the nearest enclosing named element, so check it matches the symbol you intended. When `totalIsExact` is `false`, `totalCount` is a lower bound.
 **type values**: `METHOD_CALL`, `FIELD_ACCESS`, `IMPORT`, `PARAMETER`, `VARIABLE`, `REFERENCE`
 
 ### ide_find_definition
@@ -156,7 +157,7 @@ Search for classes/interfaces by name using IDE's class index. Equivalent to Ctr
 | `pageSize` | integer | no | Results per page. Default 25, max 500 |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ classes: [{name, qualifiedName, file, line, kind, language}], totalCount, query }`
+**Returns**: `{ classes: [{symbolId, name, qualifiedName, file, line, kind, language}], totalCount, query }`
 **Path note**: Project results use relative paths. Dependency/library results may use absolute paths or `jar://` URLs.
 **Matching**: CamelCase (`USvc` -> `UserService`), substring, wildcard (`User*Impl`).
 
@@ -199,10 +200,11 @@ Search for text using IntelliJ Find in Files. Plain-text queries do substring ma
 ### ide_find_implementations
 Find implementations of interfaces, abstract classes, or abstract methods.
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Exact type/method handle from a previous result. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column. Required for position-based lookup. |
@@ -214,7 +216,7 @@ Find implementations of interfaces, abstract classes, or abstract methods.
 | `pageSize` | integer | no | Results per page. Default 100, max 500 |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ implementations: [{name, file, line, column, kind, language}], totalCount, nextCursor?, hasMore, totalCollected, offset, pageSize, stale }`
+**Returns**: `{ implementations: [{symbolId?, name, file, line, column, kind, language}], totalCount, nextCursor?, hasMore, totalCollected, offset, pageSize, stale }`
 **Languages**: Java, Kotlin, Python, JS/TS, PHP, Rust (not Go).
 
 ### ide_find_symbol (disabled by default)
@@ -231,17 +233,18 @@ Search for any code symbol (classes, methods, fields, functions) by name.
 | `pageSize` | integer | no | Results per page. Default 25, max 500 |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ symbols: [{name, qualifiedName, file, line, kind, language}], totalCount, query }`
+**Returns**: `{ symbols: [{symbolId, name, qualifiedName, file, line, kind, language}], totalCount, query }`
 **Languages**: Java, Kotlin, Python, JS/TS, Go, PHP, Rust, plus other IDE-supplied symbol contributors where available.
 **Path note**: Project results use relative paths. Dependency/library results may use absolute paths or `jar://` URLs.
 
 ### ide_find_super_methods
 Find parent methods that a given method overrides or implements.
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Exact method handle from a previous result. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column (anywhere in method body works). Required for position-based lookup. |
@@ -249,7 +252,7 @@ Find parent methods that a given method overrides or implements.
 | `symbol` | string | conditional | Fully qualified symbol reference. For JS/TS, use module-qualified forms: `modulePath#exportName`, `modulePath#default`, or `modulePath#ClassName.memberName`. Required for symbol-based lookup. |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ method: {name, class, file, line}, hierarchy: [{name, class, file, line, isInterface}], totalCount }`
+**Returns**: `{ method: {symbolId?, name, class, file, line}, hierarchy: [{symbolId?, name, class, file, line, isInterface}], totalCount }`
 **Languages**: Java, Kotlin, Python, JS/TS, PHP (NOT Go, Rust).
 
 ### ide_type_hierarchy
@@ -536,16 +539,20 @@ Replace an entire member declaration (signature + body) with new content.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | yes | Relative file path |
+| `target` | object | conditional | Exactly one nested selector: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Mutually exclusive with all legacy target/member selectors (`symbolId`, `language`+`symbol`, `file`, `class`, `member`, `parameterCount`, `line`). |
+| `symbolId` | string | conditional | Exact member handle. Mutually exclusive with member selectors. |
+| `language` | string | conditional | Legacy semantic lookup language. Required with `symbol`; mutually exclusive with `target`, `symbolId`, and member selectors. |
+| `symbol` | string | conditional | Legacy qualified member name. Required with `language`; mutually exclusive with `target`, `symbolId`, and member selectors. |
+| `file` | string | conditional | Relative file path. Required without `symbolId`. |
 | `class` | string | no | Class name to scope the search |
-| `member` | string | yes | Name of the member to replace |
+| `member` | string | conditional | Name of the member to replace. Required without `symbolId`. |
 | `parameterCount` | integer | no | Parameter count to disambiguate overloads |
 | `line` | integer | no | 1-based line to disambiguate same-name members |
 | `content` | string | yes | Full replacement declaration (signature + body) |
 | `reformat` | boolean | no | Reformat after replacement (default true) |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ success, file, message, startLine, endLine }`
+**Returns**: `{ success, file, message, startLine, endLine, updatedSymbol? }`
 
 ### ide_insert_member (disabled by default, Java, Kotlin)
 Insert a new member at a structural position in a class or file.
@@ -569,16 +576,20 @@ Replace a method body or field initializer only, preserving the signature.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | yes | Relative file path |
+| `target` | object | conditional | Exactly one nested selector: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Mutually exclusive with all legacy target/member selectors (`symbolId`, `language`+`symbol`, `file`, `class`, `member`, `parameterCount`, `line`). |
+| `symbolId` | string | conditional | Exact member handle. Mutually exclusive with member selectors. |
+| `language` | string | conditional | Legacy semantic lookup language. Required with `symbol`; mutually exclusive with `target`, `symbolId`, and member selectors. |
+| `symbol` | string | conditional | Legacy qualified member name. Required with `language`; mutually exclusive with `target`, `symbolId`, and member selectors. |
+| `file` | string | conditional | Relative file path. Required without `symbolId`. |
 | `class` | string | no | Class name to scope the search |
-| `member` | string | yes | Name of the member whose body/initializer to replace |
+| `member` | string | conditional | Name of the member whose body/initializer to replace. Required without `symbolId`. |
 | `parameterCount` | integer | no | Parameter count to disambiguate overloads |
 | `line` | integer | no | 1-based line to disambiguate same-name members |
 | `content` | string | yes | New method body (without braces) or field initializer (without `=`) |
 | `reformat` | boolean | no | Reformat after replacement (default true) |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ success, file, message, startLine, endLine }`
+**Returns**: `{ success, file, message, startLine, endLine, updatedSymbol? }`
 
 ---
 

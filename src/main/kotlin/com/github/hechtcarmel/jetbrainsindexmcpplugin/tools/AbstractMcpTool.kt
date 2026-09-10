@@ -1,20 +1,15 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools
 
-import com.intellij.usageView.UsageViewUtil
-import com.intellij.psi.PsiNamedElement
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiSourcePosition
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.OptimizedSymbolSearch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.toArgumentFailure
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.exceptions.IndexNotReadyException
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.OptimizedSymbolSearch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobMatcher
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
@@ -23,7 +18,9 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ClassResolver
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiUtils
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiSourcePosition
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ResponseFormatter
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.ModalityState
@@ -32,6 +29,7 @@ import com.intellij.openapi.application.asContextElement
 import com.intellij.openapi.application.readAction as platformReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Document
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
@@ -44,7 +42,9 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.util.PsiModificationTracker
+import com.intellij.usageView.UsageViewUtil
 import com.intellij.util.concurrency.annotations.RequiresReadLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -96,12 +96,12 @@ import kotlinx.serialization.json.put
  *
  * ## PSI Synchronization
  *
- * By default, all tools automatically synchronize PSI with document changes before
- * execution. This ensures that recently created or modified files (e.g., by external
- * tools like Claude Code's write tool) are visible to PSI-based searches.
+ * Tools whose [requiresPsiSync] flag is enabled can synchronize PSI with document changes before
+ * execution. When the user opts in, this ensures that recently created or modified files (e.g.,
+ * by external tools like Claude Code's write tool) are visible to PSI-based searches.
  *
  * This behavior is controlled by:
- * - **User setting**: "Sync external file changes" in Settings (enabled by default)
+ * - **User setting**: "Sync external file changes" in Settings (disabled by default)
  * - **Per-tool opt-out**: Override [requiresPsiSync] to `false` for tools that don't use PSI
  *
  * ```kotlin
@@ -151,7 +151,7 @@ abstract class AbstractMcpTool : McpTool {
      */
     protected open val participatesInLifecycle: Boolean = true
 
-    /** Whether this tool accepts the additive nested target selector. */
+    /** Whether this tool accepts the additive nested `target` selector contract. */
     protected open val supportsUnifiedTarget: Boolean = false
 
     /**
@@ -753,7 +753,15 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         }
     }
 
-    /** Binds the exact navigation PSI; reuse a live preferred handle after edits. */
+    /** True when this call identifies its target exclusively through an opaque symbol handle. */
+    protected fun isSymbolIdLookup(arguments: JsonObject): Boolean =
+        resolveLookupMode(arguments) == LookupModeState.SYMBOL_ID
+
+    /**
+     * Binds the declaration's source/navigation PSI to an opaque server-side handle.
+     * Passing [preferredId] after a refactoring preserves the caller's ID whenever its cache
+     * entry is still live; otherwise the registry issues a replacement.
+     */
     @RequiresReadLock
     protected fun bindSymbolId(
         project: Project,
@@ -769,18 +777,19 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
     protected fun bindExactSymbolId(project: Project, element: PsiElement, preferredId: String? = null): String =
         SymbolIdRegistry.getInstance().bind(project, element, preferredId)
 
-    /** Current declaration metadata shared by preview and apply. */
+    /** Builds the common post-resolution/refactoring metadata returned to MCP clients. */
     @RequiresReadLock
     protected fun resolvedSymbolInfo(
         project: Project,
         element: PsiElement,
-        preferredId: String? = null
+        preferredId: String? = null,
+        preserveExactTarget: Boolean = false
     ): ResolvedSymbolInfo {
-        val target = PsiUtils.resolveNavigationTarget(element)
+        val target = if (preserveExactTarget) element else PsiUtils.resolveNavigationTarget(element)
         val position = PsiSourcePosition.position(project, target)
         val qualifiedName = PsiUtils.qualifiedName(target)
         return ResolvedSymbolInfo(
-            symbolId = bindSymbolId(project, target, preferredId),
+            symbolId = bindExactSymbolId(project, target, preferredId),
             name = (target as? PsiNamedElement)?.name,
             kind = UsageViewUtil.getType(target).takeIf { it.isNotBlank() },
             container = qualifiedName ?: PsiUtils.getAstPath(target).joinToString(".").ifEmpty { null },
@@ -857,16 +866,124 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
 
     /**
      * Gets a page from the pagination cache.
-     * Extracts project basePath and PSI mod count, delegates to PaginationService.
+     * Delegates to PaginationService with exact project identity and materializes cached symbol
+     * handles only for the items in the page that is about to be returned.
      * Returns GetPageResult — caller maps Success/Error into tool-specific CallToolResult.
      *
      * @param pageSize Explicit pageSize from request, or null to use the cursor-embedded value.
      */
     protected suspend fun getPageFromCache(cursorToken: String, pageSize: Int?, project: Project): PaginationService.GetPageResult {
         val service = ApplicationManager.getApplication().getService(PaginationService::class.java)
-        val basePath = ProjectResolver.normalizePath(project.basePath ?: "")
-        val modCount = PsiModificationTracker.getInstance(project).modificationCount
-        return service.getPage(cursorToken, pageSize, basePath, modCount)
+        val modificationTracker = PsiModificationTracker.getInstance(project)
+        val modCount = modificationTracker.modificationCount
+        val pageResult = service.getPage(cursorToken, pageSize, project, modCount, expectedToolName = name)
+        if (pageResult !is PaginationService.GetPageResult.Success) return pageResult
+
+        val page = pageResult.page
+        val hasSerializedPayload = page.serializedItems.isNotEmpty() || page.serializedMetadata.isNotEmpty()
+        if (!service.isPageSnapshotCurrent(
+                page = page,
+                project = project,
+                expectedToolName = name
+            )
+        ) {
+            return invalidatedCachedPage()
+        }
+
+        if (!hasSerializedPayload) return pageResult
+
+        val materialized = suspendingReadAction {
+            val beforeModCount = modificationTracker.modificationCount
+            if (!service.isPageSnapshotCurrent(
+                    page = page,
+                    project = project,
+                    expectedToolName = name
+                )
+            ) {
+                return@suspendingReadAction invalidatedCachedPage()
+            }
+
+            val result = materializeCachedSymbolHandles(project, pageResult)
+            val afterModCount = modificationTracker.modificationCount
+            if (beforeModCount != afterModCount ||
+                !service.isPageSnapshotCurrent(
+                    page = page,
+                    project = project,
+                    expectedToolName = name
+                )
+            ) {
+                invalidatedCachedPage()
+            } else {
+                result
+            }
+        }
+
+        if (materialized !is PaginationService.GetPageResult.Success) return materialized
+        return if (service.isPageSnapshotCurrent(
+                page = page,
+                project = project,
+                expectedToolName = name
+            )
+        ) {
+            PaginationService.GetPageResult.Success(
+                materialized.page.copy(stale = page.stale || modificationTracker.modificationCount != page.psiModCount)
+            )
+        } else {
+            invalidatedCachedPage()
+        }
+    }
+
+    private fun invalidatedCachedPage(): PaginationService.GetPageResult.Error =
+        PaginationService.GetPageResult.Error(
+            PaginationService.CursorError.SEARCH_INVALIDATED,
+            "Cached symbol context expired or changed. Please re-search."
+        )
+
+    /**
+     * A cached smart pointer outlives the short-lived symbol handle that was last returned for it.
+     * Rebind the exact pointer on demand, preferring the previous handle while it is still valid.
+     */
+    private fun materializeCachedSymbolHandles(
+        project: Project,
+        result: PaginationService.GetPageResult.Success
+    ): PaginationService.GetPageResult {
+        return try {
+            fun materialize(serialized: PaginationService.SerializedResult): JsonElement {
+                val pointer = serialized.exactSymbolPointer ?: return serialized.data
+                val symbolId = synchronized(serialized) {
+                    val element = pointer.element
+                        ?: throw IllegalStateException("A cached symbol no longer resolves")
+                    bindExactSymbolId(project, element, serialized.materializedSymbolId).also {
+                        serialized.materializedSymbolId = it
+                    }
+                }
+                val objectData = serialized.data as? JsonObject
+                    ?: throw IllegalStateException("Cached symbol data is not a JSON object")
+                return JsonObject(objectData + (ParamNames.SYMBOL_ID to JsonPrimitive(symbolId)))
+            }
+
+            val page = result.page
+            val materializedMetadata = page.metadata + page.serializedMetadata.mapValues { (_, value) ->
+                materialize(value).toString()
+            }
+            PaginationService.GetPageResult.Success(
+                page.copy(
+                    items = page.serializedItems.map(::materialize),
+                    metadata = materializedMetadata
+                )
+            )
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: com.intellij.openapi.project.IndexNotReadyException) {
+            throw e
+        } catch (_: Exception) {
+            PaginationService.GetPageResult.Error(
+                PaginationService.CursorError.SEARCH_INVALIDATED,
+                "Cached symbol context expired or changed. Please re-search."
+            )
+        }
     }
 
     /**

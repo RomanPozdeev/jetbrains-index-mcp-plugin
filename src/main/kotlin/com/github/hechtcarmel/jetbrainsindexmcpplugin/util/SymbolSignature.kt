@@ -2,6 +2,7 @@ package com.github.hechtcarmel.jetbrainsindexmcpplugin.util
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.SymbolParameterInfo
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiNameIdentifierOwner
 
 /**
  * Wire values for `SymbolInfoResult.signatureSource`.
@@ -91,13 +92,25 @@ object SymbolSignatureResolver {
     }
 
     /**
-     * The first line of the declaration, cut at the body opener so a whole class does not come
-     * back as a "signature".
+     * The source line containing the declaration's name, cut at the body opener. A declaration
+     * can start with annotations or documentation, so its first line need not describe the symbol.
+     * Elements without a source name identifier retain the first-nonblank-line fallback.
      */
     private fun declarationLine(element: PsiElement): String {
         val text = element.text.orEmpty()
-        val head = text.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
-        val cut = head.indexOfFirst { it == '{' }
+        val identifier = (element as? PsiNameIdentifierOwner)?.nameIdentifier
+        val nameOffset = identifier?.textRange?.startOffset
+            ?.minus(element.textRange.startOffset)
+            ?.takeIf { it in text.indices }
+        val lineStart = nameOffset?.let { text.lastIndexOf('\n', it - 1) + 1 } ?: 0
+        val sourceLine = text.substring(lineStart).lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+        val head = sourceLine.trim()
+        // A brace inside an inline annotation or a quoted identifier is not the body opener.
+        val bodySearchStart = if (nameOffset != null) {
+            val indentation = sourceLine.length - sourceLine.trimStart().length
+            nameOffset + requireNotNull(identifier).textLength - lineStart - indentation
+        } else 0
+        val cut = head.indexOf('{', bodySearchStart.coerceAtLeast(0))
         val line = if (cut > 0) head.take(cut).trim() else head
         return line.take(MAX_TEXT_FALLBACK_CHARS)
     }

@@ -38,7 +38,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "rebuild":
@@ -133,7 +133,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "scope":
@@ -239,7 +239,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "symbol":
@@ -328,7 +328,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -368,7 +368,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -424,7 +424,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -494,7 +494,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "severity":
@@ -539,9 +539,13 @@ description:
   {"file": "src/Worker.java", "class": "Worker", "member": "Worker", "content": "public interface Worker<T> extends Runnable { ... }"}
   
   The content should be the complete replacement including modifiers, type, name, and body.
+  It must contain exactly one syntactically valid declaration of the original category,
+  optionally surrounded by comments. Nested declarations are allowed. Invalid or ambiguous
+  content is rejected before editing; use ide_refactor_safe_delete for deletion.
   Auto-reformats the changed range by default.
   
   Examples:
+  - {"symbolId": "<opaque-id>", "content": "public void renamed() {}"}
   - {"file": "src/Main.java", "class": "Main", "member": "process", "content": "public void process(String input, boolean validate) {\n    if (validate) check(input);\n}"}
   - {"file": "src/Config.kt", "class": "Config", "member": "timeout", "content": "val timeout: Duration = Duration.ofSeconds(30)"}
   - {"file": "src/Service.java", "member": "Service", "content": "public class Service<T> implements Serializable { ... }"}
@@ -556,12 +560,24 @@ schema:
       },
       "content":
       {
-        "description": "The complete replacement member declaration including modifiers, type, name, and body.",
+        "description": "Exactly one complete, syntactically valid declaration of the original category, including modifiers, type, name, and body. Surrounding comments are allowed.",
         "type": "string"
       },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required with member selectors; omit when symbolId is used.",
+        "type": "string"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
         "type": "string"
       },
       "line":
@@ -571,7 +587,7 @@ schema:
       },
       "member":
       {
-        "description": "Name of the method, function, field, or property to replace entirely.",
+        "description": "Name of the method, function, field, or property to replace entirely. Required unless symbolId is used.",
         "type": "string"
       },
       "parameterCount":
@@ -581,19 +597,78 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "reformat":
       {
         "description": "Auto-reformat the changed range and optimize imports. Default: true.",
         "type": "boolean"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "required":
     [
-      "file",
-      "member",
       "content"
     ],
     "type": "object"
@@ -614,7 +689,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -645,7 +720,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -710,7 +785,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "query":
@@ -792,7 +867,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "symbol":
@@ -898,7 +973,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "query":
@@ -933,6 +1008,7 @@ description:
   Supports pagination: first call returns results + nextCursor. Pass cursor to get the next page.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call (necessary for fresh search, ignored when cursor is provided)
   - file + line + column: position-based lookup (necessary for fresh search, ignored when cursor is provided)
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript; necessary for fresh search, ignored when cursor is provided)
   - cursor: pagination cursor from a previous response
@@ -991,7 +1067,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "scope":
@@ -1010,6 +1086,62 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -1024,6 +1156,7 @@ description:
   Supports pagination: first call returns results + nextCursor. Pass cursor to get the next page.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call (necessary for fresh search, ignored when cursor is provided)
   - file + line + column: position-based lookup (necessary for fresh search, ignored when cursor is provided)
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript; necessary for fresh search, ignored when cursor is provided)
   - cursor: pagination cursor from a previous response
@@ -1088,7 +1221,7 @@ schema:
       },
       "paths":
       {
-        "description": "Project-relative path globs restricting the search, e.g. [\"src/main/**\", \"!**/*Test.kt\"]. '*' matches within a path segment, '**' crosses directories, a plain directory path includes everything beneath it, and a leading '!' excludes. Includes are unioned, then excludes are subtracted; with only excludes, everything else is searched. Combines with the tool's other filters (scope, filePattern). Because globs are project-relative, any include glob also drops results that have no project-relative path — library and jar hits under scope project_and_libraries; an exclude-only filter leaves those alone. An include glob whose literal directory prefix does not exist in the project, or resolves under a different relative name than it was written with, is reported as an error.",
+        "description": "Project-relative globs, e.g. [\"src/main/**\", \"!**/*Test.kt\"]. '*' stays within a segment, '**' crosses directories, plain directories include descendants, '!' excludes. Union includes, then subtract excludes; exclusion-only starts with all results. Combines with scope/filePattern. Includes omit library/jar hits without a project-relative path; exclusion-only keeps them. Include globs must have an existing literal directory prefix with the exact relative spelling.",
         "items":
         {
           "type": "string"
@@ -1098,7 +1231,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "scope":
@@ -1117,6 +1250,62 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -1133,6 +1322,7 @@ description:
   Returns: full hierarchy chain from immediate parent (depth=1) to root, with file locations (line/column) and containing class info.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup (position can be anywhere within the method body)
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -1173,13 +1363,69 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "symbol":
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -1230,7 +1476,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "query":
@@ -1269,7 +1515,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1294,7 +1540,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1316,7 +1562,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1385,7 +1631,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "reformat":
@@ -1431,7 +1677,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1478,7 +1724,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1527,7 +1773,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "waitSeconds":
@@ -1564,7 +1810,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1602,7 +1848,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1642,7 +1888,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1698,7 +1944,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "timeoutSeconds":
@@ -1734,7 +1980,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1806,7 +2052,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "severity":
@@ -1858,7 +2104,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -1891,7 +2137,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "qualifiedName":
@@ -1975,7 +2221,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "relatedRenamingStrategy":
@@ -2133,7 +2379,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "symbol":
@@ -2247,7 +2493,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "rearrangeCode":
@@ -2283,7 +2529,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2320,7 +2566,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2353,7 +2599,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2368,10 +2614,11 @@ description:
   For fields/properties: replaces the initializer expression (after =).
   Auto-reformats the changed range by default.
   
-  Requires: file (always), member (always). class is optional for top-level members (Kotlin).
+  Target with symbolId, or with file + member. class is optional for top-level members (Kotlin).
   For overloaded methods, use parameterCount or line to disambiguate.
   
   Examples:
+  - {"symbolId": "<opaque-id>", "content": "return 42;"}
   - {"file": "src/Main.java", "class": "Main", "member": "getName", "content": "return this.name;"}
   - {"file": "src/Config.kt", "member": "defaultPort", "content": "8080"}
 schema:
@@ -2390,7 +2637,19 @@ schema:
       },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required with member selectors; omit when symbolId is used.",
+        "type": "string"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
         "type": "string"
       },
       "line":
@@ -2400,7 +2659,7 @@ schema:
       },
       "member":
       {
-        "description": "Name of the method, function, field, or property to replace the body/initializer of.",
+        "description": "Name of the method, function, field, or property to replace the body/initializer of. Required unless symbolId is used.",
         "type": "string"
       },
       "parameterCount":
@@ -2410,19 +2669,78 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "reformat":
       {
         "description": "Auto-reformat the changed range and optimize imports. Default: true.",
         "type": "boolean"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "required":
     [
-      "file",
-      "member",
       "content"
     ],
     "type": "object"
@@ -2463,7 +2781,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "regex":
@@ -2510,7 +2828,7 @@ schema:
     {
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2577,7 +2895,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "runId":
@@ -2663,7 +2981,7 @@ schema:
       },
       "paths":
       {
-        "description": "Project-relative path globs restricting the search, e.g. [\"src/main/**\", \"!**/*Test.kt\"]. '*' matches within a path segment, '**' crosses directories, a plain directory path includes everything beneath it, and a leading '!' excludes. Includes are unioned, then excludes are subtracted; with only excludes, everything else is searched. Combines with the tool's other filters (scope, filePattern). Because globs are project-relative, any include glob also drops results that have no project-relative path — library and jar hits under scope project_and_libraries; an exclude-only filter leaves those alone. An include glob whose literal directory prefix does not exist in the project, or resolves under a different relative name than it was written with, is reported as an error.",
+        "description": "Project-relative globs, e.g. [\"src/main/**\", \"!**/*Test.kt\"]. '*' stays within a segment, '**' crosses directories, plain directories include descendants, '!' excludes. Union includes, then subtract excludes; exclusion-only starts with all results. Combines with scope/filePattern. Includes omit library/jar hits without a project-relative path; exclusion-only keeps them. Include globs must have an existing literal directory prefix with the exact relative spelling.",
         "items":
         {
           "type": "string"
@@ -2673,7 +2991,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "query":
@@ -2728,7 +3046,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2768,7 +3086,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2809,7 +3127,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2857,7 +3175,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -2894,7 +3212,7 @@ schema:
       },
       "paths":
       {
-        "description": "Project-relative path globs restricting the search, e.g. [\"src/main/**\", \"!**/*Test.kt\"]. '*' matches within a path segment, '**' crosses directories, a plain directory path includes everything beneath it, and a leading '!' excludes. Includes are unioned, then excludes are subtracted; with only excludes, everything else is searched. Combines with the tool's other filters (scope, filePattern). Because globs are project-relative, any include glob also drops results that have no project-relative path — library and jar hits under scope project_and_libraries; an exclude-only filter leaves those alone. An include glob whose literal directory prefix does not exist in the project, or resolves under a different relative name than it was written with, is reported as an error.",
+        "description": "Project-relative globs, e.g. [\"src/main/**\", \"!**/*Test.kt\"]. '*' stays within a segment, '**' crosses directories, plain directories include descendants, '!' excludes. Union includes, then subtract excludes; exclusion-only starts with all results. Combines with scope/filePattern. Includes omit library/jar hits without a project-relative path; exclusion-only keeps them. Include globs must have an existing literal directory prefix with the exact relative spelling.",
         "items":
         {
           "type": "string"
@@ -2904,7 +3222,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "replacePattern":
@@ -2998,7 +3316,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "symbol":
@@ -3087,7 +3405,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       }
     },
@@ -3138,7 +3456,7 @@ schema:
       },
       "project_path":
       {
-        "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
+        "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
         "type": "string"
       },
       "scope":

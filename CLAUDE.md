@@ -739,8 +739,8 @@ apply returns current `updatedSymbol` metadata. The preview response assembly is
 with subsequent refactoring preview implementations.
 
 `-PkotlinPluginTests=true` loads the bundled Kotlin plugin and the sources under
-`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest` and
-`KotlinChangeSignatureBehaviorTest`. The plugin's newer
+`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest`,
+`KotlinChangeSignatureBehaviorTest`, and `KotlinSymbolInfoBehaviorTest`. The plugin's newer
 metadata is excluded from test compilation, and the test runtime uses the IDE's matching stdlib.
 
 ### Safe-delete preview
@@ -757,3 +757,12 @@ ignore non-code word matches; lambda, catch and loop bindings return structured 
 `dryRun=true` uses public platform usage and conflict discovery without running the processor.
 The shared preview reports affected files, conflicts, read-only scope, and cases requiring
 an interactive overrider/default-value decision. Apply returns updated symbol metadata.
+
+### Symbol handles in search and member editing
+
+Class, symbol, reference, implementation, and super-method queries expose exact declaration handles.
+Reference and implementation queries and member edits accept the shared target selectors.
+Cached searches keep `stale=true` after PSI edits and rebind exact smart pointers on returned pages;
+deleted targets and another project/session are rejected. Member edits return updated metadata.
+Kotlin abstract/sealed declarations retain `ABSTRACT_CLASS`; anonymous implementations have
+a useful source location without an invented qualified name.
