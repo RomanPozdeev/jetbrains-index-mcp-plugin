@@ -533,3 +533,9 @@ src/main/kotlin/.../
 3. If the dependency conflicts with IntelliJ's bundled coroutines or slf4j,
    add `exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-core")`
    (see existing Ktor entries for the pattern)
+
+### Optional Kotlin refactoring fixtures
+
+Run `./gradlew test -PkotlinPluginTests=true --tests '*KotlinSafeDeleteParameterBehaviorTest'`
+to exercise real Kotlin lambda, catch and loop parameters. The default suite does not load
+the Kotlin plugin; this opt-in source set uses the bundled plugin only for its test runtime.

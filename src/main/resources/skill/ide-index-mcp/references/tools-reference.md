@@ -405,19 +405,26 @@ Move a file to a new directory. Applies language-aware reference, import, and pa
 **Supports IDE undo** (Ctrl+Z).
 
 ### ide_refactor_safe_delete (Java, Kotlin)
+
 Delete a symbol or file, checking for usages first.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | yes | Relative file path |
+| `target` | object | conditional | Structured symbol selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | conditional | Exact symbol handle for `target_type="symbol"`. Mutually exclusive with coordinates. |
+| `file` | string | conditional | Relative file path. Required for position-based symbol deletion and file deletion. |
+| `language` | string | conditional | Legacy qualified-name selector language; requires `symbol`. |
+| `symbol` | string | conditional | Legacy qualified symbol name; requires `language`. |
 | `line` | integer | no | Required for target_type="symbol" |
 | `column` | integer | no | Required for target_type="symbol" |
 | `target_type` | enum | no | `symbol` (default) or `file` |
 | `force` | boolean | no | Force delete even with usages (default false) |
+| `dryRun` | boolean | no | Resolve target and discover usages/blockers without deleting or saving. Default false |
 | `project_path` | string | no | Project root path |
 
-**Returns (success)**: `{ success, affectedFiles, changesCount, message }`
+**Returns (success)**: `{ success, affectedFiles, changesCount, message, invalidatedSymbolId? }`
 **Returns (blocked)**: `{ canDelete: false, elementName, usageCount, blockingUsages: [...], message }`
+**Returns with `dryRun: true`**: common preview shape; `plannedChange` contains `{operation: "safeDelete", targetType, name, force}`. Usages contribute to `conflictCount`; without `force`, they make `canApply` false. Preview leaves `symbolId` valid. Generated Kotlin JVM methods without a matching standalone source declaration are rejected in preview and apply, including with `force`; select the intended source declaration explicitly.
 **Only available in**: IntelliJ IDEA, Android Studio (requires Java plugin).
 
 ### ide_reformat_code (disabled by default)

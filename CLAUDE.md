@@ -741,3 +741,11 @@ with subsequent refactoring preview implementations.
 `-PkotlinPluginTests=true` loads the bundled Kotlin plugin and the sources under
 `src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest`. The plugin's newer
 metadata is excluded from test compilation, and the test runtime uses the IDE's matching stdlib.
+
+### Safe-delete preview
+
+`ide_refactor_safe_delete` accepts `dryRun: true` and uses the same preview response as rename.
+It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply share forced-delete
+eligibility, including files with no declarations and incomplete usage discovery; warnings describe
+these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
+ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.

@@ -2001,7 +2001,7 @@ description:
   Delete a symbol or file safely by first checking for usages. Use when removing code to avoid breaking references.
   
   Modes:
-  - target_type='symbol' (default): Delete the symbol at line/column (REQUIRED: file, line, column).
+  - target_type='symbol' (default): Delete the exact symbol selected by symbolId, or by file + line/column.
     If position is whitespace/comment, returns nearby symbol suggestions.
   - target_type='file': Delete the entire file (REQUIRED: file only).
     Only succeeds if no symbols have external usages. Internal call chains don't block deletion.
@@ -2012,6 +2012,7 @@ description:
   Returns: success status and affected files, OR blocking usages list, OR nearby symbol suggestions.
   
   Examples:
+  - Symbol ID: {"symbolId": "<opaque-id>"}
   - Symbol: {"file": "src/OldClass.java", "line": 10, "column": 14}
   - Symbol with force: {"file": "src/OldClass.java", "line": 10, "column": 14, "force": true}
   - File: {"file": "src/UnusedUtils.java", "target_type": "file"}
@@ -2024,9 +2025,14 @@ schema:
         "description": "1-based column number. REQUIRED when target_type='symbol' (default).",
         "type": "integer"
       },
+      "dryRun":
+      {
+        "description": "Resolve the target and check usages without deleting anything. Default: false.",
+        "type": "boolean"
+      },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required for file deletion or position-based symbol deletion; omit when symbolId is used.",
         "type": "string"
       },
       "force":
@@ -2034,6 +2040,18 @@ schema:
         "default": false,
         "description": "Force deletion even if usages exist. Default: false. Use with caution!",
         "type": "boolean"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
+        "type": "string"
       },
       "line":
       {
@@ -2044,6 +2062,67 @@ schema:
       {
         "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
         "type": "string"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       },
       "target_type":
       {
@@ -2057,10 +2136,6 @@ schema:
         "type": "string"
       }
     },
-    "required":
-    [
-      "file"
-    ],
     "type": "object"
   }
 
