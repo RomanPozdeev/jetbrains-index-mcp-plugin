@@ -140,10 +140,15 @@ if (kotlinPluginTests.get()) {
             !it.invariantSeparatorsPath.contains("/plugins/Kotlin/")
         })
     }
-    // Match the IDE's stdlib so optional plugin code sees the platform's Kotlin APIs.
-    configurations.testRuntimeClasspath {
-        exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
-    }
+}
+
+// All platform tests need the IDE's matching stdlib, not just opt-in Kotlin plugin tests.
+// PlatformTaskSupport also calls newer Kotlin APIs (e.g. sequenceOf(Object)); Gradle's
+// injected stdlib can shadow the IDE runtime and fail during modal progress/conflict discovery.
+configurations.testRuntimeClasspath {
+    exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
+    exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib-jdk7")
+    exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib-jdk8")
 }
 
 // Configure IntelliJ Platform Gradle Plugin - read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-extension.html

@@ -15,6 +15,21 @@ import java.io.IOException
 
 class ChangeSignatureBehaviorTest : McpPlatformTestCase() {
 
+    fun testAlreadyPackagePrivateMethodAcceptsTheRequestedVisibility() = runBlocking {
+        registerSourceRoot("sig-package-src")
+        val file = "sig-package-src/PackageMethod.java"
+        val before = "class PackageMethod { void run() {} }"
+        writeProjectFile(file, before)
+        val result = ChangeSignatureTool().execute(project, buildJsonObject {
+            put("file", file)
+            put("line", 1)
+            put("column", before.indexOf("run") + 1)
+            put("newVisibility", "package-private")
+        })
+        assertToolSucceeded("An already satisfied package-private visibility is a successful no-op", result)
+        assertEquals(before, readProjectFileVfs(file))
+    }
+
     /**
      * Caller updating is the whole point of Change Signature, so it is asserted in both
      * directions.

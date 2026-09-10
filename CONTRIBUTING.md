@@ -470,9 +470,18 @@ call sites". It is thin in these areas:
   parameters, Java-signature lookup of Kotlin source declarations, and refusal of implicit
   constructors, generated `copy` methods, and property accessors. Other Kotlin-specific paths still
   need dedicated behavior coverage or manual IDE verification. The opt-in configuration keeps the
-  plugin's newer metadata off `compileTestKotlin` and removes the Gradle-injected stdlib from the
-  test runtime so the IDE's matching stdlib is used; an older runtime stdlib causes
-  `NoSuchMethodError: SequencesKt.sequenceOf` during Kotlin usage search.
+  plugin's newer metadata off `compileTestKotlin`. All test runs, including the default CI suite,
+  exclude the Gradle-injected stdlib so the IDE's matching runtime is used. An older runtime
+  stdlib causes `NoSuchMethodError: SequencesKt.sequenceOf` in platform modal progress/conflict
+  discovery as well as Kotlin usage search, even without the Kotlin plugin enabled.
+  `KotlinChangeSignatureBehaviorTest` covers source-position and semantic-handle lookup,
+  function rename, adding an `Int` parameter with a caller default across an interface and
+  override, unchanged preview source, and silent processor aborts. It verifies that selecting
+  the base preserves the original override handle and checks the base source file's writability.
+  Post-apply verification must resolve a fresh light method from a source smart pointer because
+  a retained light method can report the old signature after successful source edits.
+  Extension/suspend parameter mapping, Kotlin-only type syntax, and other change-signature
+  options still lack dedicated Kotlin behavior coverage.
 - **Some tools are still never executed by any test**, only schema- and response-shape-checked:
   `ide_build_project`, `ide_reload_project`, `ide_import_modules`, `ide_open_workspace`,
   `ide_restart`, `ide_lifecycle_log`, `ide_set_lifecycle_log_file`, and `ide_run_tests` (only its

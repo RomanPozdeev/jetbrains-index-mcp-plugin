@@ -52,6 +52,7 @@
   file: string
   message: string
   success: boolean
+  updatedSymbol: object? (optional)
 
 ## ConversionStatus (enum)
   CONVERTED -> "CONVERTED"

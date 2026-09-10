@@ -11,6 +11,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ConflictMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiUtils
 import com.intellij.lang.LanguageNamesValidation
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
@@ -1724,12 +1725,7 @@ class RenameSymbolTool : AbstractMcpTool() {
             val ktNamedFunctionClass = Class.forName("org.jetbrains.kotlin.psi.KtNamedFunction")
             if (!ktNamedFunctionClass.isInstance(element)) return null
 
-            // Use LightClassUtils to get the light method wrapper
-            val lightClassUtilsClass = Class.forName("org.jetbrains.kotlin.asJava.LightClassUtilsKt")
-            val lightElements = lightClassUtilsClass.getMethod("toLightMethods", PsiElement::class.java)
-                .invoke(null, element) as? List<*> ?: return null
-
-            val lightMethod = lightElements.firstOrNull() ?: return null
+            val lightMethod = PsiUtils.toLightMethodsStrict(element).firstOrNull() ?: return null
 
             val psiMethodClass = Class.forName("com.intellij.psi.PsiMethod")
             if (!psiMethodClass.isInstance(lightMethod)) return null

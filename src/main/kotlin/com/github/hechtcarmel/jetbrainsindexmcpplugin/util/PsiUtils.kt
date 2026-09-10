@@ -17,6 +17,7 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.PsiQualifiedNamedElement
 import com.intellij.psi.PsiReference
+import java.lang.reflect.InvocationTargetException
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
 
@@ -416,12 +417,22 @@ object PsiUtils {
      * Returns an empty list when the Kotlin plugin is unavailable, the element has no
      * corresponding JVM method (e.g. a local `val`), or reflection fails.
      */
-    fun toLightMethods(element: PsiElement): List<PsiMethod> {
-        val lightClassUtils = lightClassUtilsClass ?: return emptyList()
-        @Suppress("UNCHECKED_CAST")
-        return runCatching {
-            lightClassUtils.getMethod("toLightMethods", PsiElement::class.java).invoke(null, element) as? List<PsiMethod>
-        }.getOrNull() ?: emptyList()
+    fun toLightMethods(element: PsiElement): List<PsiMethod> =
+        runCatching { toLightMethodsStrict(element) }.getOrDefault(emptyList())
+
+    /**
+     * Strict variant for refactorings: missing APIs, discovery failures and cancellation propagate
+     * instead of being mistaken for a declaration with no JVM methods. Call under a read lock.
+     */
+    fun toLightMethodsStrict(element: PsiElement): List<PsiMethod> {
+        val lightClassUtils = Class.forName("org.jetbrains.kotlin.asJava.LightClassUtilsKt")
+        return try {
+            @Suppress("UNCHECKED_CAST")
+            lightClassUtils.getMethod("toLightMethods", PsiElement::class.java)
+                .invoke(null, element) as List<PsiMethod>
+        } catch (exception: InvocationTargetException) {
+            throw exception.cause ?: exception
+        }
     }
 }
 

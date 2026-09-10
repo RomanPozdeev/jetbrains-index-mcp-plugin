@@ -7,19 +7,26 @@ import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Ref
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiManager
+import com.intellij.refactoring.changeSignature.ChangeInfo
+import com.intellij.refactoring.changeSignature.ChangeSignatureUsageProcessor
+import com.intellij.refactoring.rename.ResolveSnapshotProvider
 import com.intellij.refactoring.rename.naming.AutomaticRenamer
 import com.intellij.refactoring.rename.naming.AutomaticRenamerFactory
 import com.intellij.usageView.UsageInfo
+import com.intellij.util.containers.MultiMap
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -51,6 +58,31 @@ class RefactoringDryRunBehaviorTest : McpPlatformTestCase() {
         val plan = assertPreview(preview, expectedCanApply = false)
         assertTrue(plan.getValue("conflictCount").jsonPrimitive.int > 0)
         assertBytesUnchanged(before)
+    }
+
+    fun testNewTrailingVarargNeedsNoDefaultValueInPreviewOrApply() = runBlocking {
+        registerSourceRoot("dry-vararg-src")
+        val file = "dry-vararg-src/Vararg.java"
+        val path = writeProjectFile(file, "class Vararg { void work() {} void caller() { work(); } }")
+        val before = snapshotBytes(path)
+        val arguments = buildJsonObject {
+            put("file", file)
+            put("line", 1)
+            put("column", 21)
+            put("newParameters", buildJsonArray {
+                add(buildJsonObject { put("oldIndex", -1); put("name", "values"); put("type", "int...") })
+            })
+        }
+        val preview = ChangeSignatureTool().execute(project, JsonObject(arguments + ("dryRun" to JsonPrimitive(true))))
+        assertPreview(preview, expectedCanApply = true)
+        assertBytesUnchanged(before)
+        val applied = ChangeSignatureTool().execute(project, arguments)
+        assertToolSucceeded("A trailing vararg accepts existing zero-argument callers", applied)
+        ReadAction.run<Throwable> {
+            assertFileContains(file, "void work(int... values)")
+            assertFileContains(file, "work();")
+            assertFileDoesNotContain(file, "void work()")
+        }
     }
 
     fun testRenameDryRunDiscoversCrossFileUsageAndPreservesFilesByteForByte() = runBlocking {
@@ -353,6 +385,328 @@ class RefactoringDryRunBehaviorTest : McpPlatformTestCase() {
         assertTrue(Files.readString(caller).contains("other.renamedRelated()"))
     }
 
+    fun testChangeSignatureDryRunDiscoversCallerAndPreservesFilesByteForByte() = runBlocking {
+        registerSourceRoot("dry-signature-src")
+        val declaration = writeProjectFile(
+            "dry-signature-src/preview/SignatureTarget.java",
+            """
+            package preview;
+            class SignatureTarget {
+                String format(String input) { return input; }
+            }
+            """.trimIndent()
+        )
+        val caller = writeProjectFile(
+            "dry-signature-src/preview/SignatureCaller.java",
+            """
+            package preview;
+            class SignatureCaller {
+                String call(SignatureTarget target) { return target.format("value"); }
+            }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(declaration, caller)
+        val tool = ChangeSignatureTool().also {
+            it.processorRunHook = { error("ChangeSignatureProcessor.run() must not be called by dry-run") }
+        }
+
+        val result = tool.execute(project, buildJsonObject {
+            put("file", "dry-signature-src/preview/SignatureTarget.java")
+            put("line", 3)
+            put("column", 12)
+            put("newParameters", buildJsonArray {
+                add(buildJsonObject {
+                    put("oldIndex", 0)
+                    put("name", "input")
+                    put("type", "String")
+                })
+                add(buildJsonObject {
+                    put("oldIndex", -1)
+                    put("name", "uppercase")
+                    put("type", "boolean")
+                    put("defaultValue", "false")
+                })
+            })
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = true)
+        assertTrue(preview.getValue("usageCount").jsonPrimitive.int >= 1)
+        val affected = preview.getValue("affectedFiles").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue(affected.contains("dry-signature-src/preview/SignatureTarget.java"))
+        assertTrue(affected.contains("dry-signature-src/preview/SignatureCaller.java"))
+        assertBytesUnchanged(before)
+        assertFalse(readProjectFileVfsUnderReadAction(declaration).contains("uppercase"))
+        assertFalse(readProjectFileVfsUnderReadAction(caller).contains("false"))
+    }
+
+    fun testChangeSignaturePreviewAndApplyRejectSignatureCollisionWithoutMutatingFiles() = runBlocking {
+        registerSourceRoot("dry-signature-conflict-src")
+        val declaration = writeProjectFile(
+            "dry-signature-conflict-src/preview/SignatureConflict.java",
+            """
+            package preview;
+            class SignatureConflict {
+                void original(int value) {}
+                void occupied(int value) {}
+            }
+            """.trimIndent()
+        )
+        val caller = writeProjectFile(
+            "dry-signature-conflict-src/preview/ConflictCaller.java",
+            """
+            package preview;
+            class ConflictCaller { void call(SignatureConflict target) { target.original(1); } }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(declaration, caller)
+        val arguments = buildJsonObject {
+            put("file", "dry-signature-conflict-src/preview/SignatureConflict.java")
+            put("line", 3)
+            put("column", 10)
+            put("newName", "occupied")
+        }
+        var processorEntered = false
+        val tool = ChangeSignatureTool().also {
+            it.processorRunHook = { processorEntered = true }
+        }
+        val preview = assertPreview(
+            tool.execute(project, JsonObject(arguments + ("dryRun" to JsonPrimitive(true)))),
+            expectedCanApply = false
+        )
+        assertTrue("Preview must discover the duplicate signature", preview.getValue("conflictCount").jsonPrimitive.int > 0)
+        assertPreviewWarningContains(preview, "occupied")
+        assertBytesUnchanged(before)
+
+        val applied = tool.execute(project, arguments)
+        assertToolFailed("Apply must refuse the same signature collision", applied)
+        assertTrue(toolText(applied).contains("occupied"))
+        assertFalse("Conflict detection must abort before the mutating processor", processorEntered)
+        assertBytesUnchanged(before)
+    }
+
+    fun testChangeSignatureDryRunMetadataMatchesApplyWhenConflictExtensionReplacesUsages() = runBlocking {
+        registerSourceRoot("dry-signature-extension-src")
+        val declaration = writeProjectFile(
+            "dry-signature-extension-src/preview/ExtensionTarget.java",
+            """
+            package preview;
+            class ExtensionTarget { String format(String input) { return input; } }
+            """.trimIndent()
+        )
+        val caller = writeProjectFile(
+            "dry-signature-extension-src/preview/ExtensionCaller.java",
+            """
+            package preview;
+            class ExtensionCaller {
+                String call(ExtensionTarget target) { return target.format("value"); }
+            }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(declaration, caller)
+        val filteringProcessor = object : ChangeSignatureUsageProcessor {
+            override fun findUsages(changeInfo: ChangeInfo): Array<UsageInfo> = emptyArray()
+
+            override fun findConflicts(
+                changeInfo: ChangeInfo,
+                usages: Ref<Array<UsageInfo>>
+            ): MultiMap<PsiElement, String> {
+                usages.set(emptyArray())
+                return MultiMap.empty<PsiElement, String>()
+            }
+
+            override fun processUsage(
+                changeInfo: ChangeInfo,
+                usageInfo: UsageInfo,
+                beforeMethodChange: Boolean,
+                usages: Array<UsageInfo>
+            ): Boolean = true
+
+            override fun processPrimaryMethod(changeInfo: ChangeInfo): Boolean = true
+
+            override fun shouldPreviewUsages(
+                changeInfo: ChangeInfo,
+                usages: Array<UsageInfo>
+            ): Boolean = false
+
+            override fun setupDefaultValues(
+                changeInfo: ChangeInfo,
+                usages: Ref<Array<UsageInfo>>,
+                project: Project
+            ): Boolean = true
+
+            override fun registerConflictResolvers(
+                conflictResolvers: MutableList<in ResolveSnapshotProvider.ResolveSnapshot>,
+                resolveSnapshotProvider: ResolveSnapshotProvider,
+                usages: Array<UsageInfo>,
+                changeInfo: ChangeInfo
+            ) = Unit
+        }
+        ChangeSignatureUsageProcessor.EP_NAME.point.registerExtension(
+            filteringProcessor,
+            testRootDisposable
+        )
+
+        val result = ChangeSignatureTool().execute(project, buildJsonObject {
+            put("file", "dry-signature-extension-src/preview/ExtensionTarget.java")
+            put("line", 2)
+            put("column", 32)
+            put("newName", "render")
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = true)
+        val affected = preview.getValue("affectedFiles").jsonArray.map { it.jsonPrimitive.content }
+        assertBytesUnchanged(before)
+        val applied = ChangeSignatureTool().execute(project, buildJsonObject {
+            put("file", "dry-signature-extension-src/preview/ExtensionTarget.java")
+            put("line", 2)
+            put("column", 32)
+            put("newName", "render")
+        })
+        assertToolSucceeded("Apply after the same conflict extension", applied)
+        ReadAction.run<Throwable> {
+            assertFileContains("dry-signature-extension-src/preview/ExtensionTarget.java", "render(")
+            assertFileContains("dry-signature-extension-src/preview/ExtensionCaller.java", "target.render(")
+            assertFileDoesNotContain("dry-signature-extension-src/preview/ExtensionCaller.java", "target.format(")
+        }
+        assertTrue("Preview must disclose a caller that apply changes", affected.contains("dry-signature-extension-src/preview/ExtensionCaller.java"))
+        assertTrue(affected.contains("dry-signature-extension-src/preview/ExtensionTarget.java"))
+        assertTrue(preview.getValue("usageCount").jsonPrimitive.int > 0)
+    }
+
+    fun testChangeSignaturePreviewAndApplyPreserveExistingThrowsForVisibilityChange() = runBlocking {
+        registerSourceRoot("dry-signature-throws-src")
+        val declaration = writeProjectFile(
+            "dry-signature-throws-src/preview/ThrowsTarget.java",
+            """
+            package preview;
+            import java.io.IOException;
+            class ThrowsTarget {
+                String work(String value) throws IOException { return value; }
+            }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(declaration)
+        val tool = ChangeSignatureTool()
+
+        val previewResult = tool.execute(project, buildJsonObject {
+            put("file", "dry-signature-throws-src/preview/ThrowsTarget.java")
+            put("line", 4)
+            put("column", 12)
+            put("newVisibility", "public")
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(previewResult, expectedCanApply = true)
+        val plannedChange = preview.getValue("plannedChange").jsonObject
+        assertEquals("changeSignature", plannedChange.getValue("operation").jsonPrimitive.content)
+        assertEquals(
+            "package-private",
+            plannedChange.getValue("before").jsonObject.getValue("visibility").jsonPrimitive.content
+        )
+        assertEquals(
+            "public",
+            plannedChange.getValue("requested").jsonObject.getValue("newVisibility").jsonPrimitive.content
+        )
+        assertBytesUnchanged(before)
+        assertTrue(readProjectFileVfsUnderReadAction(declaration).contains("throws IOException"))
+
+        val applyResult = tool.execute(project, buildJsonObject {
+            put("file", "dry-signature-throws-src/preview/ThrowsTarget.java")
+            put("line", 4)
+            put("column", 12)
+            put("newVisibility", "public")
+        })
+
+        assertToolSucceeded("Change Signature apply should preserve existing throws", applyResult)
+        assertTrue(
+            readProjectFileVfsUnderReadAction(declaration)
+                .contains("public String work(String value) throws IOException")
+        )
+    }
+
+    fun testChangeSignatureDryRunWithNewParameterWithoutDefaultFailsClosed() = runBlocking {
+        registerSourceRoot("dry-signature-default-src")
+        val declaration = writeProjectFile(
+            "dry-signature-default-src/preview/DefaultTarget.java",
+            """
+            package preview;
+            class DefaultTarget { void format(String input) {} }
+            """.trimIndent()
+        )
+        val caller = writeProjectFile(
+            "dry-signature-default-src/preview/DefaultCaller.java",
+            """
+            package preview;
+            class DefaultCaller { void call(DefaultTarget target) { target.format("value"); } }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(declaration, caller)
+
+        val arguments = buildJsonObject {
+            put("file", "dry-signature-default-src/preview/DefaultTarget.java")
+            put("line", 2)
+            put("column", 35)
+            put("newParameters", buildJsonArray {
+                add(buildJsonObject {
+                    put("oldIndex", 0)
+                    put("name", "input")
+                    put("type", "String")
+                })
+                add(buildJsonObject {
+                    put("oldIndex", -1)
+                    put("name", "required")
+                    put("type", "boolean")
+                })
+            })
+        }
+        var processorEntered = false
+        val tool = ChangeSignatureTool().also {
+            it.processorRunHook = { processorEntered = true }
+        }
+        val result = tool.execute(project, JsonObject(arguments + ("dryRun" to JsonPrimitive(true))))
+
+        val preview = assertPreview(result, expectedCanApply = false)
+        assertPreviewWarningContains(preview, "no explicit non-blank defaultValue")
+        assertPreviewWarningContains(preview, "non-compiling callers")
+        assertBytesUnchanged(before)
+
+        val applied = tool.execute(project, arguments)
+        assertToolFailed("Apply must reject a missing call-site argument before editing", applied)
+        assertFalse("The mutating processor must not run with missing required arguments", processorEntered)
+        assertBytesUnchanged(before)
+    }
+
+    fun testChangeSignatureDryRunWithCovariantOverriderFailsClosed() = runBlocking {
+        registerSourceRoot("dry-signature-overrider-src")
+        val source = writeProjectFile(
+            "dry-signature-overrider-src/preview/SignatureInheritance.java",
+            """
+            package preview;
+            class BaseSignature {
+                CharSequence value() { return "base"; }
+            }
+            class ChildSignature extends BaseSignature {
+                @Override String value() { return "child"; }
+            }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(source)
+
+        val result = ChangeSignatureTool().execute(project, buildJsonObject {
+            put("file", "dry-signature-overrider-src/preview/SignatureInheritance.java")
+            put("line", 3)
+            put("column", 18)
+            put("newReturnType", "Object")
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = false)
+        assertPreviewWarningContains(preview, "covariant-overrider choice")
+        assertBytesUnchanged(before)
+    }
+
     fun testDryRunDoesNotSaveAnUnrelatedDirtyDocument() = runBlocking {
         registerSourceRoot("dry-dirty-src")
         val target = writeProjectFile(
@@ -590,6 +944,34 @@ class RefactoringDryRunBehaviorTest : McpPlatformTestCase() {
         val preview = assertPreview(result, expectedCanApply = false)
         assertPreviewWarningContains(preview, "simulated file delete search failure")
         assertProjectFileExists("dry-file-delete-fail-src/preview/FailedFileDelete.java")
+        assertBytesUnchanged(before)
+    }
+
+    fun testChangeSignatureDryRunFailsClosedWhenUsageDiscoveryBreaks() = runBlocking {
+        val file = writeProjectFile(
+            "dry-signature-fail-closed/SignatureFailureTarget.java",
+            """
+            class SignatureFailureTarget {
+                void work() {}
+            }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(file)
+        val tool = ChangeSignatureTool().also {
+            it.previewUsageSearchHook = { error("simulated signature search failure") }
+            it.processorRunHook = { error("ChangeSignatureProcessor.run() must not be called by dry-run") }
+        }
+
+        val result = tool.execute(project, buildJsonObject {
+            put("file", "dry-signature-fail-closed/SignatureFailureTarget.java")
+            put("line", 2)
+            put("column", 10)
+            put("newName", "renamedWork")
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = false)
+        assertPreviewWarningContains(preview, "simulated signature search failure")
         assertBytesUnchanged(before)
     }
 

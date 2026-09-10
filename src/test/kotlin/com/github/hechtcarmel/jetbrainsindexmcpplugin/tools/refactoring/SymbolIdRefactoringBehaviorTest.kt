@@ -4,6 +4,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.McpPlatformTestCase
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.DefinitionResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.RefactoringResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.FindDefinitionTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.SymbolInfoTool
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
@@ -11,6 +12,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
@@ -29,6 +32,39 @@ class SymbolIdRefactoringBehaviorTest : McpPlatformTestCase() {
         } finally {
             super.tearDown()
         }
+    }
+
+    fun testChangeSignatureByIdReturnsReboundMetadataAndUpdatesCaller() = runBlocking {
+        registerSourceRoot("signature-id-src")
+        val declaration = """
+            package signatureid;
+            class Service {
+                int calculate(int input) { return input; }
+            }
+        """.trimIndent()
+        writeProjectFile("signature-id-src/signatureid/Service.java", declaration)
+        writeProjectFile(
+            "signature-id-src/signatureid/Caller.java",
+            """
+            package signatureid;
+            class Caller {
+                int call(Service service) { return service.calculate(1); }
+            }
+            """.trimIndent()
+        )
+        val definition = definitionAt("signature-id-src/signatureid/Service.java", declaration, "calculate")
+
+        val result = ChangeSignatureTool().execute(project, buildJsonObject {
+            put("symbolId", definition.symbolId)
+            put("newName", "compute")
+        })
+        assertToolSucceeded("change_signature should accept symbolId", result)
+        val payload = json.parseToJsonElement(toolText(result)).jsonObject
+        val updated = json.decodeFromJsonElement<ResolvedSymbolInfo>(payload.getValue("updatedSymbol"))
+        assertEquals(definition.symbolId, updated.symbolId)
+        assertEquals("compute", updated.name)
+        assertRenamedInFile("signature-id-src/signatureid/Service.java", "calculate", "compute")
+        assertRenamedInFile("signature-id-src/signatureid/Caller.java", "calculate", "compute")
     }
 
     fun testSafeDeleteByIdReturnsInvalidatedIdAndFurtherLookupsExpire() = runBlocking {

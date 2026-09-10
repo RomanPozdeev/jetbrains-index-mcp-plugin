@@ -440,9 +440,10 @@ plugin:
   untestable.
 
 `-PkotlinPluginTests=true` additionally loads the bundled Kotlin plugin and the sources under
-`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest` and the safe-delete
-parameter, qualified-target, and synthetic-target behavior tests. The plugin's newer metadata is
-excluded from test compilation; the test runtime uses the IDE's matching stdlib.
+`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest`,
+`KotlinChangeSignatureBehaviorTest`, and the safe-delete parameter, qualified-target, and
+synthetic-target behavior tests. The plugin's newer metadata is excluded from test compilation;
+the test runtime uses the IDE's matching stdlib.
 
 `gradle.properties` also adds `JavaScript` to `platformBundledPlugins`. That one is *not*
 test-only in form — it is a compile/test classpath entry — but it does not change what the plugin
@@ -516,7 +517,7 @@ Tools are organized by IDE availability.
 - `ide_import_modules` - Import external Maven project directories as modules into the current IntelliJ window for cross-project code intelligence and refactoring. Already imported module roots are skipped. Requires Maven plugin. (disabled by default)
 - `ide_open_workspace` - Scan a root directory for Maven projects and open them all in one IntelliJ window with full cross-project code intelligence, or provide an explicit list of Maven project paths via `modules`. `path` and `modules` are mutually exclusive; `modules` uses SHA-based caching. Creates a temporary aggregator POM with relative module paths. Requires Maven plugin. (disabled by default)
 - `ide_build_project` - Build project using IDE's build system (JPS, Gradle, Maven, CMake (CLion)). Returns structured errors/warnings with file locations when available (null counts = no messages captured, not 0). Uses CompilationStatusListener for JPS builds, BuildProgressListener (BuildViewManager) for Gradle/Maven builds, and for CLion — whose CMake builds bypass both — the cidr build-finished topic plus the build log from the Messages tool window, parsed for MSVC/Clang/CMake diagnostics. Supports workspace sub-project targeting via `project_path`. Each call blocks at most `waitSeconds` (default 45): a still-running call returns `{"status": "running", "buildId": ...}` and the agent polls with `buildId` while the build continues in the IDE. (disabled by default)
-- `ide_change_signature` - Change method signature (name, return type, visibility, parameters) with automatic caller updates using IntelliJ's Change Signature refactoring. Java only. (disabled by default)
+- `ide_change_signature` - Change method signature (name, return type, visibility, parameters) with automatic caller updates using IntelliJ's Change Signature refactoring. Java methods and Kotlin JVM functions; Kotlin position/handle targets resolve to the base declaration for override changes. (disabled by default)
 - `ide_create_file` - Create a new source file with content, immediately indexed by IntelliJ. Created through IntelliJ's VFS, instantly available for all IDE tools without needing `ide_sync_files`. Use instead of Write for `.java`, `.kt`, `.ts`, `.tsx`, `.py` files. File must not already exist. (disabled by default)
 - `ide_replace_text_in_file` - Find and replace text in a file using IntelliJ's Document API. Plain text or regex replacement through IntelliJ's document model, so changes are immediately visible to index, PSI, and all other IDE tools without needing `ide_sync_files`. (disabled by default)
 - `ide_run_tests` - Run tests via the IDE's run configuration infrastructure. `target` accepts an existing run config name (works for any language/framework) or a Java/Kotlin class/method FQN (`com.example.MyTest` / `com.example.MyTest#testFoo`). **Creating a config from an FQN is Java/Kotlin-only** — for Python/JS/TS/Go/PHP/Rust, pass an existing run-config name. Results are read directly from the IDE's test runner (any Service-Message-based framework: JUnit, TestNG, pytest, Jest, Go test, PHPUnit), returning structured pass/fail/error counts, exit code, per-test results, and console output (each test's own prints on its entry, unattributed framework/suite output on the result's `output` field; stdout/stderr merged in print order, ANSI stripped, system messages excluded, size-budgeted). Each call blocks at most `waitSeconds` (default 45) so the MCP client's request timeout is never hit: a still-running call — including one whose pre-test build is still compiling, in which case the test process has not started yet — returns `{"status": "running", "runId": ...}` and the agent polls with `runId` while the run (bounded by `timeoutSeconds` counted from process start, enforced by a registry watchdog) continues in the IDE. By default the run does not activate (pop open) the Run tool window; pass `activateToolWindow: true` to open it. (disabled by default)
@@ -658,6 +659,17 @@ current applicability without deleting or saving anything or invalidating a hand
 symbol deletion selected by an incoming handle returns it as `invalidatedSymbolId`. Files with no
 discovered top-level declarations retain the existing apply eligibility but carry an
 incomplete-discovery warning; `force` can explicitly override usages or a failed usage search.
+
+### Change-signature Preview
+
+`ide_change_signature` accepts the same exact/nested targets and `dryRun: true` preview contract.
+Preview reports the current and requested signatures, affected declarations/callers, conflicts,
+read-only scope, missing required caller/delegate arguments, and interactive overrider decisions
+without running the processor. Apply runs the same conflict and safety checks before editing.
+Successful apply returns current `updatedSymbol` metadata. Return-type changes with overriders
+are conservatively refused, even where narrower overriding return types could be retained.
+Unlike Kotlin targets, Java override targets do not redirect to the base; select the Java base
+explicitly for hierarchy-wide changes.
 
 ### Search Collection Pattern (Processor)
 

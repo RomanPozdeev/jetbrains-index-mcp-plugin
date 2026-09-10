@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ide_change_signature` supports non-mutating dry-run previews, exact/nested symbol targets, and Kotlin JVM functions. Preview reports usage/conflict discovery and applicability; apply refuses conflicts, incomplete discovery, read-only scope, missing required caller/delegate arguments, and interactive overrider decisions. Kotlin override changes start at the base declaration and preserve the original handle. Successful apply returns updated declaration metadata.
+
+### Fixed
+
+- Change signature no longer strips existing `throws` clauses on apply.
+
 ## [5.13.0] - 2026-09-14
 
 ### Added
