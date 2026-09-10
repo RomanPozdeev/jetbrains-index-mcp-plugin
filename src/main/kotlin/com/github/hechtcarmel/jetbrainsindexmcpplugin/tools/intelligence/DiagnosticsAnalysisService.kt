@@ -1,6 +1,8 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.intelligence
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ProblemInfo
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.cancellableBlockingAction
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.cancellableEdtAction
 import com.intellij.codeInsight.CodeSmellInfo
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.codeInsight.daemon.ProblemHighlightFilter
@@ -9,29 +11,21 @@ import com.intellij.codeInsight.daemon.impl.HighlightInfo
 import com.intellij.ide.PowerSaveMode
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.EDT
-import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
-import com.intellij.openapi.application.asContextElement
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.TextEditor
-import com.intellij.openapi.progress.ProgressManager
-import com.intellij.openapi.progress.util.ProgressIndicatorBase
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Computable
 import com.intellij.openapi.vcs.CodeSmellDetector
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jetbrains.annotations.TestOnly
 import kotlin.math.max
@@ -313,13 +307,8 @@ class DiagnosticsAnalysisService(private val project: Project) {
                     )
                 )
             } else {
-                withContext(Dispatchers.Default) {
-                    ProgressManager.getInstance().runProcess(
-                        Computable {
-                            CodeSmellDetector.getInstance(project).findCodeSmells(listOf(fileContext.virtualFile))
-                        },
-                        ProgressIndicatorBase()
-                    )
+                cancellableBlockingAction {
+                    CodeSmellDetector.getInstance(project).findCodeSmells(listOf(fileContext.virtualFile))
                 }
             }
         } ?: return null
@@ -484,11 +473,8 @@ class DiagnosticsAnalysisService(private val project: Project) {
         // stays on the pre-reload tree until the Document is committed. Only a Document that was
         // already loaded can be stale; when there is none, PSI is built from the refreshed content.
         val document = fileDocumentManager.getCachedDocument(virtualFile) ?: return
-        val commit = { PsiDocumentManager.getInstance(project).commitDocument(document) }
-        if (ApplicationManager.getApplication().isDispatchThread) {
-            commit()
-        } else {
-            withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { commit() }
+        invokeOnEdt {
+            PsiDocumentManager.getInstance(project).commitDocument(document)
         }
     }
 
@@ -502,17 +488,7 @@ class DiagnosticsAnalysisService(private val project: Project) {
     }
 
     private suspend fun <T> invokeOnEdt(action: () -> T): T {
-        return if (ApplicationManager.getApplication().isDispatchThread) {
-            action()
-        } else {
-            withContext(Dispatchers.Default) {
-                var result: Result<T>? = null
-                ApplicationManager.getApplication().invokeAndWait {
-                    result = runCatching(action)
-                }
-                result!!.getOrThrow()
-            }
-        }
+        return cancellableEdtAction(action)
     }
 
     private fun timeoutResult(timeoutMs: Long): FileAnalysisResult {

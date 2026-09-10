@@ -273,6 +273,12 @@ TypeScript SDK), and the stateless Streamable HTTP transport cannot send keep-al
 notifications (kotlin-sdk 0.10.0 drops them in JSON response mode). **No tool call may ever
 block past ~45–55s** — a longer operation must long-poll (issue #277).
 
+`McpToolDispatcher` gives ordinary tool execution a 55-second coroutine deadline and reports
+expiry as an actionable tool error. The three long-poll tools retain their own budgets so their
+operation IDs are not lost. Cancellation remains cooperative: use cancellable EDT dispatch and
+`cancellableBlockingAction` for interruptible blocking analysis with a platform progress indicator.
+An already-running write is not rolled back on timeout; callers must inspect it before retrying.
+
 Shared infrastructure (used by `ide_run_tests`, `ide_build_project`, and `ide_project_diagnostics`):
 - `tools/LongPoll.kt` — the per-call wait-budget policy: `waitSeconds` parameter, default 45,
   ceiling 55.
@@ -438,6 +444,12 @@ plugin:
   (the Java plugin declares that extension point but ships no implementations), so
   `ide_list_tests` could only ever answer "No test frameworks are registered" and would be
   untestable.
+
+`-PkotlinPluginTests=true` additionally loads the bundled Kotlin plugin and the sources under
+`src/kotlinPluginTest/kotlin`, including `KotlinReplaceMemberFormattingBehaviorTest`.
+The plugin's newer metadata is excluded from test compilation;
+the test runtime uses the IDE's stdlib to avoid shadowing it with Gradle's older Kotlin dependency.
+See CONTRIBUTING.md for the command and remaining Kotlin coverage limits.
 
 `gradle.properties` also adds `JavaScript` to `platformBundledPlugins`. That one is *not*
 test-only in form — it is a compile/test classpath entry — but it does not change what the plugin
