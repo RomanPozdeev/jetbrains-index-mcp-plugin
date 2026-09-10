@@ -190,7 +190,9 @@ data class ImplementationData(
     val line: Int,
     val column: Int,
     val kind: String,
-    val language: String
+    val language: String,
+    val qualifiedName: String? = null,
+    val pointerTarget: PsiElement? = null
 )
 
 /**
@@ -224,7 +226,8 @@ data class SymbolData(
     val line: Int,
     val column: Int,
     val containerName: String?,
-    val language: String
+    val language: String,
+    val pointerTarget: PsiElement
 )
 
 /**
@@ -245,7 +248,8 @@ data class MethodData(
     val file: String,
     val line: Int,
     val column: Int,
-    val language: String
+    val language: String,
+    val pointerTarget: PsiElement? = null
 )
 
 /**
@@ -261,7 +265,8 @@ data class SuperMethodData(
     val column: Int?,
     val isInterface: Boolean,
     val depth: Int,
-    val language: String
+    val language: String,
+    val pointerTarget: PsiElement? = null
 )
 
 /**

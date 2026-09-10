@@ -132,15 +132,29 @@ abstract class BaseJavaHandler<T> : LanguageHandler<T> {
     }
 
     protected fun getClassKind(psiClass: PsiClass): String {
+        PsiUtils.kotlinClassKind(psiClass.navigationElement)?.takeUnless { it == "CLASS" }?.let { return it }
+
         return when {
-            psiClass.isInterface -> "INTERFACE"
-            psiClass.isEnum -> "ENUM"
             psiClass.isAnnotationType -> "ANNOTATION"
             psiClass.isRecord -> "RECORD"
+            psiClass.isEnum -> "ENUM"
+            psiClass.isInterface -> "INTERFACE"
             psiClass.hasModifierProperty("abstract") -> "ABSTRACT_CLASS"
             else -> "CLASS"
         }
     }
+
+    /** Prefer the physical declaration so Kotlin `getFqName()` participates in metadata. */
+    protected fun getQualifiedClassName(psiClass: PsiClass): String? =
+        PsiUtils.qualifiedName(psiClass.navigationElement)
+            ?: PsiUtils.qualifiedName(psiClass)
+
+    protected fun getClassDisplayName(project: Project, psiClass: PsiClass): String =
+        getQualifiedClassName(psiClass)
+            ?: psiClass.name
+            ?: PsiUtils.classDisplayName(project, psiClass.navigationElement)
+            ?: PsiUtils.classDisplayName(project, psiClass)
+            ?: "unknown"
 
     protected fun findContainingClass(element: PsiElement): PsiClass? {
         if (element is PsiClass) return element
@@ -574,7 +588,9 @@ class JavaImplementationsHandler : BaseJavaHandler<List<ImplementationData>>(), 
                         line = getLineNumber(project, overridingMethod) ?: 0,
                         column = getColumnNumber(project, overridingMethod) ?: 0,
                         kind = "METHOD",
-                        language = if (overridingMethod.language.id == "kotlin") "Kotlin" else "Java"
+                        language = if (overridingMethod.navigationElement.language.id == "kotlin") "Kotlin" else "Java",
+                        qualifiedName = null,
+                        pointerTarget = overridingMethod
                     ))
                 }
                 results.size < MAX_COLLECTED_NAVIGATION_RESULTS
@@ -604,12 +620,14 @@ class JavaImplementationsHandler : BaseJavaHandler<List<ImplementationData>>(), 
                 val file = inheritor.containingFile?.virtualFile
                 if (file != null && shouldIncludeNavigationElement(searchScope, inheritor)) {
                     results.add(ImplementationData(
-                        name = inheritor.qualifiedName ?: inheritor.name ?: "unknown",
+                        name = getClassDisplayName(project, inheritor),
                         file = getRelativePath(project, file),
                         line = getLineNumber(project, inheritor) ?: 0,
                         column = getColumnNumber(project, inheritor) ?: 0,
                         kind = getClassKind(inheritor),
-                        language = if (inheritor.language.id == "kotlin") "Kotlin" else "Java"
+                        language = if (inheritor.navigationElement.language.id == "kotlin") "Kotlin" else "Java",
+                        qualifiedName = getQualifiedClassName(inheritor),
+                        pointerTarget = inheritor
                     ))
                 }
                 results.size < MAX_COLLECTED_NAVIGATION_RESULTS
@@ -996,7 +1014,8 @@ class JavaSuperMethodsHandler : BaseJavaHandler<SuperMethodsData>(), SuperMethod
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, method) ?: 0,
             column = getColumnNumber(project, method) ?: 0,
-            language = if (method.language.id == "kotlin") "Kotlin" else "Java"
+            language = if (method.navigationElement.language.id == "kotlin") "Kotlin" else "Java",
+            pointerTarget = method
         )
 
         val hierarchy = buildHierarchy(project, method)
@@ -1033,7 +1052,8 @@ class JavaSuperMethodsHandler : BaseJavaHandler<SuperMethodsData>(), SuperMethod
                 column = getColumnNumber(project, superMethod),
                 isInterface = containingClass?.isInterface == true,
                 depth = depth,
-                language = if (superMethod.language.id == "kotlin") "Kotlin" else "Java"
+                language = if (superMethod.navigationElement.language.id == "kotlin") "Kotlin" else "Java",
+                pointerTarget = superMethod
             ))
 
             hierarchy.addAll(buildHierarchy(project, superMethod, visited, depth + 1))

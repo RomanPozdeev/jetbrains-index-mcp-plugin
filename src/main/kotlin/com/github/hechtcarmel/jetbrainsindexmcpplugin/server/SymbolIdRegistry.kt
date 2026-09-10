@@ -1,12 +1,11 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.server
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiFileIdentity
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.vfs.VirtualFileWithId
 import com.intellij.psi.PsiElement
 import com.intellij.psi.SmartPointerManager
 import com.intellij.psi.SmartPsiElementPointer
@@ -42,26 +41,10 @@ class SymbolIdRegistry @JvmOverloads constructor(
     private data class Entry(
         val project: WeakReference<Project>,
         var pointer: SmartPsiElementPointer<PsiElement>,
-        var fileIdentity: FileIdentity?,
+        var fileIdentity: PsiFileIdentity?,
         val generation: Long,
         var lastAccessMillis: Long
     )
-
-    /** A smart pointer may recover by path after deletion; the original VFS identity must survive too. */
-    private class FileIdentity(file: VirtualFile) {
-        private val persistentId = (file as? VirtualFileWithId)?.id
-        private val protocol = file.fileSystem.protocol
-        private val reference = WeakReference(file)
-
-        fun matches(file: VirtualFile?): Boolean {
-            if (file == null || !file.isValid) return false
-            return if (persistentId != null) {
-                (file as? VirtualFileWithId)?.id == persistentId && file.fileSystem.protocol == protocol
-            } else {
-                reference.get() === file
-            }
-        }
-    }
 
     // Insertion order plus explicit promotion gives O(1) non-promoting ownership lookup.
     // It also keeps last-access times ordered for amortized prefix expiry.
@@ -144,7 +127,7 @@ class SymbolIdRegistry @JvmOverloads constructor(
         // The caller's read action keeps this validation valid until the metadata is published.
         require(!project.isDisposed) { "Cannot bind a symbol from a disposed project" }
         require(pointer.element?.isValid == true) { "Cannot bind an invalid PSI element" }
-        val fileIdentity = pointer.virtualFile?.let(::FileIdentity)
+        val fileIdentity = pointer.virtualFile?.let(::PsiFileIdentity)
         return serverEpoch.ifCurrent(
             expectedEpoch = expectedGeneration,
             stale = ::staleGeneration

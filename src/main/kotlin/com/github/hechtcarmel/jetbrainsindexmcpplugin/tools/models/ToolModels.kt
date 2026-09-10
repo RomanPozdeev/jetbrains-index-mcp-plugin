@@ -2,6 +2,8 @@ package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import com.intellij.psi.PsiElement
 
 @Serializable
 data class PositionInput(
@@ -29,6 +31,7 @@ data class UsageLocation(
  */
 @Serializable
 data class ResolvedSymbolInfo(
+    val symbolId: String,
     val name: String?,
     val kind: String?,
     val container: String?,
@@ -36,8 +39,7 @@ data class ResolvedSymbolInfo(
     val line: Int?,
     val column: Int? = null,
     val qualifiedName: String? = null,
-    val language: String? = null,
-    val symbolId: String? = null
+    val language: String? = null
 )
 
 @Serializable
@@ -187,7 +189,10 @@ data class ImplementationLocation(
     val line: Int,
     val column: Int,
     val kind: String,
-    val language: String? = null
+    val language: String? = null,
+    val qualifiedName: String? = null,
+    val symbolId: String? = null,
+    @Transient internal val pointerTarget: PsiElement? = null
 )
 
 
@@ -361,6 +366,7 @@ data class FindSymbolResult(
 
 @Serializable
 data class SymbolMatch(
+    val symbolId: String,
     val name: String,
     val qualifiedName: String?,
     val kind: String,
@@ -368,7 +374,8 @@ data class SymbolMatch(
     val line: Int,
     val column: Int,
     val containerName: String?,
-    val language: String? = null
+    val language: String? = null,
+    @Transient internal val pointerTarget: PsiElement? = null
 )
 
 // ide_find_super_methods output
@@ -387,7 +394,8 @@ data class MethodInfo(
     val file: String,
     val line: Int,
     val column: Int,
-    val language: String? = null
+    val language: String? = null,
+    val symbolId: String? = null
 )
 
 @Serializable
@@ -401,7 +409,8 @@ data class SuperMethodInfo(
     val column: Int?,
     val isInterface: Boolean,
     val depth: Int,
-    val language: String? = null
+    val language: String? = null,
+    val symbolId: String? = null
 )
 
 // ide_find_class output (reuses SymbolMatch)
