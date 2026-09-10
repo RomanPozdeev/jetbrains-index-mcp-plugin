@@ -217,3 +217,11 @@ Validation runs before PSI synchronization, and `target.symbolId` routes to its 
 Preview and apply share conflict discovery and automatic rename selections. A successful
 apply returns current `updatedSymbol` metadata. The preview response assembly is shared
 with subsequent refactoring preview implementations.
+
+### Safe-delete preview
+
+`ide_refactor_safe_delete` accepts `dryRun: true` and uses the same preview response as rename.
+It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply share forced-delete
+eligibility, including files with no declarations and incomplete usage discovery; warnings describe
+these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
+ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.

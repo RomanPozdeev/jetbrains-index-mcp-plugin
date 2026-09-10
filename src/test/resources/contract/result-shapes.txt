@@ -374,6 +374,7 @@
   elementName: string
   elementType: string
   message: string
+  symbolId: string? (optional)
   usageCount: number
 
 ## SafeDeleteFileBlockedResult

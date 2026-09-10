@@ -1026,7 +1026,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     elementType = "method",
                     usageCount = 2,
                     blockingUsages = listOf(usageInfo),
-                    message = "2 usages block deletion"
+                    message = "2 usages block deletion",
+                    symbolId = "sym_safe_delete"
                 )
             ),
             struct(UsageInfo.serializer(), usageInfo),

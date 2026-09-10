@@ -3190,17 +3190,39 @@ Safely deletes an element, first checking for usages.
 - Cleaning up dead code
 - Safely removing methods or classes
 
+Generated Kotlin JVM methods without their own source declaration are rejected in both preview
+and apply, even with `force`. Select the intended source declaration explicitly.
+
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file |
+| `target` | object | Conditional | Structured symbol selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | Conditional | Exact symbol handle. Use only with `target_type: "symbol"` and omit coordinates. |
+| `file` | string | Conditional | Path to the file. Required for position-based symbol deletion and file deletion. |
+| `language` | string | Conditional | Legacy qualified-name selector language; requires `symbol` and is mutually exclusive with other target selectors. |
+| `symbol` | string | Conditional | Legacy qualified symbol name; requires `language` and is mutually exclusive with other target selectors. |
 | `target_type` | string | No | What to delete: `"symbol"` (default) or `"file"` (deletes the entire file if no symbol has external usages) |
 | `line` | integer | Conditional | 1-based line number. Required when `target_type` is `"symbol"` (the default) |
 | `column` | integer | Conditional | 1-based column number. Required when `target_type` is `"symbol"` (the default) |
 | `force` | boolean | No | Force deletion even if usages exist (default: false) |
+| `dryRun` | boolean | No | Resolve the target and discover usages/blockers without deleting or saving anything (default: `false`) |
 
 **Example Request:**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_safe_delete",
+    "arguments": {
+      "symbolId": "sym_opaque-handle"
+    }
+  }
+}
+```
+
+**Example Request (position-based):**
 
 ```json
 {
@@ -3215,6 +3237,28 @@ Safely deletes an element, first checking for usages.
   }
 }
 ```
+
+**Example Request (preview):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_refactor_safe_delete",
+    "arguments": {
+      "target": { "symbolId": "sym_opaque-handle" },
+      "dryRun": true
+    }
+  }
+}
+```
+
+The common preview response is described in [Refactoring Preview Contract](#refactoring-preview-contract).
+For safe delete, `plannedChange` contains `operation: "safeDelete"`, `targetType`, `name`, and
+`force`. External usages contribute to both `usageCount` and `conflictCount`; `canApply` is false
+when usages exist and `force` is false, discovery was incomplete, or the target is not writable.
+Preview never invokes deletion, saves documents, or registers undo, and it does not invalidate the
+target's `symbolId`.
 
 **Example Request (delete an entire file):**
 
@@ -3236,7 +3280,8 @@ Safely deletes an element, first checking for usages.
 ```json
 {
   "success": true,
-  "message": "Successfully deleted 'LegacyHelper'"
+  "message": "Successfully deleted 'LegacyHelper'",
+  "invalidatedSymbolId": "sym_opaque-handle"
 }
 ```
 

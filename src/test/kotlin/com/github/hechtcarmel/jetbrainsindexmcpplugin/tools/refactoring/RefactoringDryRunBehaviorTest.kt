@@ -155,6 +155,97 @@ class RefactoringDryRunBehaviorTest : McpPlatformTestCase() {
         assertBytesUnchanged(before)
     }
 
+    fun testSafeDeleteDryRunChecksUsagesAndPreservesFilesByteForByte() = runBlocking {
+        registerSourceRoot("dry-delete-src")
+        val declaration = writeProjectFile(
+            "dry-delete-src/preview/DeleteTarget.java",
+            """
+            package preview;
+            class DeleteTarget {
+                String doomed() { return "value"; }
+            }
+            """.trimIndent()
+        )
+        val caller = writeProjectFile(
+            "dry-delete-src/preview/DeleteCaller.java",
+            """
+            package preview;
+            class DeleteCaller {
+                String call(DeleteTarget target) { return target.doomed(); }
+            }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(declaration, caller)
+        val tool = SafeDeleteTool().also {
+            it.beforeDeletionHook = { error("Deletion write phase must not be reached by dry-run") }
+        }
+
+        val result = tool.execute(project, buildJsonObject {
+            put("file", "dry-delete-src/preview/DeleteTarget.java")
+            put("line", 3)
+            put("column", 12)
+            put("force", true)
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = true)
+        assertTrue(preview.getValue("usageCount").jsonPrimitive.int >= 1)
+        assertTrue(preview.getValue("conflictCount").jsonPrimitive.int >= 1)
+        assertBytesUnchanged(before)
+        assertProjectFileVfsContains("dry-delete-src/preview/DeleteTarget.java", "String doomed()")
+    }
+
+    fun testFileSafeDeleteDryRunPreservesTargetFile() = runBlocking {
+        registerSourceRoot("dry-file-delete-src")
+        val target = writeProjectFile(
+            "dry-file-delete-src/preview/UnusedPreview.java",
+            """
+            package preview;
+            public class UnusedPreview {}
+            """.trimIndent()
+        )
+        val before = snapshotBytes(target)
+
+        val result = SafeDeleteTool().execute(project, buildJsonObject {
+            put("file", "dry-file-delete-src/preview/UnusedPreview.java")
+            put("target_type", "file")
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = true)
+        assertEquals("file", preview.getValue("plannedChange").jsonObject.getValue("targetType").jsonPrimitive.content)
+        assertProjectFileExists("dry-file-delete-src/preview/UnusedPreview.java")
+        assertBytesUnchanged(before)
+    }
+
+    fun testFileSafeDeleteDryRunWithoutDeclarationsMatchesApplyAndReportsLimitedDiscovery() = runBlocking {
+        registerSourceRoot("dry-file-delete-unknown-src")
+        val target = writeProjectFile(
+            "dry-file-delete-unknown-src/preview/opaque.data",
+            "opaque non-code payload"
+        )
+        val before = snapshotBytes(target)
+
+        val result = SafeDeleteTool().execute(project, buildJsonObject {
+            put("file", "dry-file-delete-unknown-src/preview/opaque.data")
+            put("target_type", "file")
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = true)
+        assertPreviewWarningContains(preview, "complete usage discovery cannot be proven")
+        assertEquals(0, preview.getValue("usageCount").jsonPrimitive.int)
+        assertEquals(0, preview.getValue("conflictCount").jsonPrimitive.int)
+        assertProjectFileExists("dry-file-delete-unknown-src/preview/opaque.data")
+        assertBytesUnchanged(before)
+        val applied = SafeDeleteTool().execute(project, buildJsonObject {
+            put("file", "dry-file-delete-unknown-src/preview/opaque.data")
+            put("target_type", "file")
+        })
+        assertToolSucceeded("The preview must agree with existing file-delete behavior", applied)
+        assertProjectFileAbsent("dry-file-delete-unknown-src/preview/opaque.data")
+    }
+
     fun testRenameDryRunReportsConflictsWithoutOpeningApplyPath() = runBlocking {
         val file = writeProjectFile(
             "dry-rename-conflict/RenameConflict.java",
@@ -439,6 +530,69 @@ class RefactoringDryRunBehaviorTest : McpPlatformTestCase() {
         }.exceptionOrNull()
 
         assertTrue("rename_base must propagate cancellation, got: $thrown", thrown is ProcessCanceledException)
+        assertBytesUnchanged(before)
+    }
+
+    fun testForcedSafeDeleteDryRunMatchesApplyWhenUsageDiscoveryBreaks() = runBlocking {
+        val file = writeProjectFile(
+            "dry-delete-fail-closed/DeleteFailureTarget.java",
+            """
+            class DeleteFailureTarget {
+                void doomed() {}
+            }
+            """.trimIndent()
+        )
+        val before = snapshotBytes(file)
+        val tool = SafeDeleteTool().also {
+            it.usageSearchHook = { error("simulated delete search failure") }
+            it.beforeDeletionHook = { error("Deletion write phase must not be reached by dry-run") }
+        }
+
+        val result = tool.execute(project, buildJsonObject {
+            put("file", "dry-delete-fail-closed/DeleteFailureTarget.java")
+            put("line", 2)
+            put("column", 10)
+            put("force", true)
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = true)
+        assertPreviewWarningContains(preview, "simulated delete search failure")
+        assertBytesUnchanged(before)
+        tool.beforeDeletionHook = null
+        val applied = tool.execute(project, buildJsonObject {
+            put("file", "dry-delete-fail-closed/DeleteFailureTarget.java")
+            put("line", 2)
+            put("column", 10)
+            put("force", true)
+        })
+        assertToolSucceeded("Force must have the same meaning in preview and apply", applied)
+        assertFalse("The applied forced deletion must remove the method", Files.readString(file).contains("doomed"))
+    }
+
+    fun testFileSafeDeleteDryRunFailsClosedWhenUsageDiscoveryBreaks() = runBlocking {
+        registerSourceRoot("dry-file-delete-fail-src")
+        val target = writeProjectFile(
+            "dry-file-delete-fail-src/preview/FailedFileDelete.java",
+            """
+            package preview;
+            class FailedFileDelete {}
+            """.trimIndent()
+        )
+        val before = snapshotBytes(target)
+        val tool = SafeDeleteTool().also {
+            it.usageSearchHook = { error("simulated file delete search failure") }
+        }
+
+        val result = tool.execute(project, buildJsonObject {
+            put("file", "dry-file-delete-fail-src/preview/FailedFileDelete.java")
+            put("target_type", "file")
+            put("dryRun", true)
+        })
+
+        val preview = assertPreview(result, expectedCanApply = false)
+        assertPreviewWarningContains(preview, "simulated file delete search failure")
+        assertProjectFileExists("dry-file-delete-fail-src/preview/FailedFileDelete.java")
         assertBytesUnchanged(before)
     }
 
