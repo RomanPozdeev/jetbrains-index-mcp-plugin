@@ -56,6 +56,7 @@ data class FindUsagesResult(
 // find_definition output
 @Serializable
 data class DefinitionResult(
+    val symbolId: String,
     val file: String,
     val line: Int,
     val column: Int,
@@ -94,6 +95,7 @@ data class SymbolParameterInfo(
  */
 @Serializable
 data class SymbolInfoResult(
+    val symbolId: String,
     val name: String,
     val kind: String?,
     val qualifiedName: String?,

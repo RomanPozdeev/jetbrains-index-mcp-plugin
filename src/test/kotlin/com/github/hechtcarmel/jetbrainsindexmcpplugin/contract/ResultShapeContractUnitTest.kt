@@ -549,6 +549,7 @@ class ResultShapeContractUnitTest : TestCase() {
             struct(
                 DefinitionResult.serializer(),
                 DefinitionResult(
+                    symbolId = "sym_definition",
                     file = "src/main/java/com/example/Service.java",
                     line = 42,
                     column = 17,
@@ -564,6 +565,7 @@ class ResultShapeContractUnitTest : TestCase() {
             struct(
                 SymbolInfoResult.serializer(),
                 SymbolInfoResult(
+                    symbolId = "sym_info",
                     name = "handle",
                     kind = "method",
                     qualifiedName = "com.example.Service#handle",

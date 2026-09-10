@@ -43,6 +43,7 @@ object ParamNames {
 
     // Symbol reference parameter
     const val SYMBOL = "symbol"
+    const val SYMBOL_ID = "symbolId"
 
     // Symbol search parameters
     const val QUERY = "query"

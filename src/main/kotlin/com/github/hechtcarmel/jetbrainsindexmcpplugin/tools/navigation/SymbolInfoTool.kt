@@ -51,6 +51,7 @@ class SymbolInfoTool : AbstractMcpTool() {
         Prefer this over ide_find_definition + reading the file when you only need the signature or the docs.
 
         Target (mutually exclusive):
+        - symbolId: opaque handle returned by a previous semantic call
         - file + line + column: position-based lookup, so overloads are addressable
         - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()})
 
@@ -61,6 +62,7 @@ class SymbolInfoTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
         .languageAndSymbol(required = false)
@@ -82,20 +84,30 @@ class SymbolInfoTool : AbstractMcpTool() {
 
             // Symbol-based resolution hands back the declaration; position-based resolution hands
             // back the leaf token under the cursor, which still has to be resolved to one.
-            val resolvedElement = element as? PsiNamedElement
+            val requestedSymbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+            val resolvedElement = if (requestedSymbolId != null) element else element as? PsiNamedElement
                 ?: (PsiUtils.resolveTargetElement(element)
                     ?: return@suspendingReadAction createErrorResult(ErrorMessages.SYMBOL_NOT_RESOLVED))
 
             // Prefer the source declaration over a compiled stand-in, so docs and line numbers
             // come from the .java/.kt file when library sources are attached.
-            val target = PsiUtils.resolveNavigationTarget(resolvedElement)
+            val target = if (requestedSymbolId != null) resolvedElement else PsiUtils.resolveNavigationTarget(resolvedElement)
 
             // The leaf the caller pointed at, when that is not the declaration itself. Java's
             // documentation provider uses it to substitute type arguments, so `list.get(0)` on a
             // List<Request> reports Request rather than the type variable E.
             val originalElement = element.takeIf { it !== target }
 
-            createJsonResult(buildResult(project, target, originalElement, includeDoc, maxDocLength))
+            createJsonResult(
+                buildResult(
+                    project,
+                    target,
+                    originalElement,
+                    includeDoc,
+                    maxDocLength,
+                    requestedSymbolId
+                )
+            )
         }
     }
 
@@ -104,7 +116,8 @@ class SymbolInfoTool : AbstractMcpTool() {
         target: PsiElement,
         originalElement: PsiElement?,
         includeDoc: Boolean,
-        maxDocLength: Int
+        maxDocLength: Int,
+        preferredSymbolId: String?
     ): SymbolInfoResult {
         val name = (target as? PsiNamedElement)?.name ?: target.text.orEmpty().take(80)
         val resolved = SymbolSignatureResolver.resolve(target, originalElement)
@@ -119,6 +132,7 @@ class SymbolInfoTool : AbstractMcpTool() {
         val position = PsiSourcePosition.position(project, target)
 
         return SymbolInfoResult(
+            symbolId = bindExactSymbolId(project, target, preferredSymbolId),
             name = name,
             kind = UsageViewUtil.getType(target).takeIf { it.isNotBlank() },
             qualifiedName = qualifiedName(target, name, resolved),

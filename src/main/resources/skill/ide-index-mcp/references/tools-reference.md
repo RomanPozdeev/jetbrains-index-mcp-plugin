@@ -13,6 +13,10 @@ Complete parameter reference for all IDE MCP tools. All tools use JSON-RPC via M
 | `language` | string | Language of the symbol (e.g., `"Java"`, `"PHP"`). Required when using `symbol`. |
 | `symbol` | string | Fully qualified symbol reference. Java format: `com.example.ClassName`, `com.example.ClassName#memberName`. PHP format: `\\App\\Service\\UserService`, `\\App\\Service\\UserService::method()`, `\\App\\Service\\UserService::CONSTANT`, `\\App\\Service\\UserService::$property`, `\\App\\Service\\StatusEnum::ACTIVE`. PHP properties require the `$property` form; plain `::name` resolves enum cases (on enum types), constants, or methods. Python format: see **Python symbol grammar** below. |
 
+**Handle identity:** Definition and metadata lookups preserve the exact stored PSI target.
+Declarations without their own source text use a source-context preview. Deleting and recreating
+a file at the same path expires its old handles; rediscover it after `SYMBOL_ID_EXPIRED`.
+
 **Symbol reference:** Some tools accept `language` + `symbol` as an alternative to `file` + `line` + `column`. The two groups are **mutually exclusive**. Supported languages: Java, PHP, JavaScript, TypeScript, Python. Unsupported languages are rejected explicitly; use `file` + `line` + `column` for other languages.
 
 **Python symbol grammar:** Symbols must be module-qualified (dotted path with ≥2 segments):
@@ -848,3 +852,12 @@ Restart the IDE. Terminates the MCP connection immediately — reconnect after t
 | `project_path` | string | no | Project root path |
 
 **Returns**: text confirmation; the connection drops right after.
+
+### Symbol handles for definition and symbol info
+
+`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
+coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
+When `project_path` is omitted, the handle identifies its owning open project. Handles expire
+on server restart, project close, deletion, one hour of inactivity, or eviction from the
+4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
+different IDs can identify the same declaration, so do not compare IDs for symbol equality.

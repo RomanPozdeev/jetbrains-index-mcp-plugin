@@ -1,5 +1,8 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.server
 
+import kotlinx.serialization.json.put
+import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.application.ReadAction
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.mcp.McpServerFactory
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.mcp.McpToolDispatcher
@@ -28,6 +31,35 @@ class McpToolDispatcherTest : BasePlatformTestCase() {
         super.setUp()
         toolRegistry = ToolRegistry().apply { registerBuiltInTools() }
         dispatcher = McpToolDispatcher(toolRegistry)
+    }
+
+    fun testSymbolIdIsUsedForProjectRoutingBeforeToolExecution() = runBlocking {
+        var generated = 0
+        val serverEpoch = McpServerEpoch()
+        val registry = SymbolIdRegistry(
+            idGenerator = { "nested-route-${++generated}" },
+            serverEpoch = serverEpoch
+        ).also { Disposer.register(testRootDisposable, it) }
+        val psiFile = myFixture.addFileToProject("src/NestedRoute.java", "class NestedRoute {}")
+        val symbolId = ReadAction.compute<String, Throwable> { registry.bind(project, psiFile) }
+        val routedDispatcher = McpToolDispatcher(
+            toolRegistry = toolRegistry,
+            recordHistory = { _, _ -> },
+            updateHistory = { _, _, _, _, _ -> },
+            symbolIdRegistryProvider = { registry },
+            serverEpochProvider = { serverEpoch }
+        )
+
+        val success = routedDispatcher.call(ToolNames.INDEX_STATUS, buildJsonObject {
+            put("symbolId", symbolId)
+        })
+        assertFalse("valid handle should route to its owning project", success.isFailure)
+
+        val expired = routedDispatcher.call(ToolNames.INDEX_STATUS, buildJsonObject {
+            put("symbolId", "missing-handle")
+        })
+        assertTrue("unknown handle must fail routing even with one project open", expired.isFailure)
+        assertTrue(expired.text.contains("SYMBOL_ID_EXPIRED"))
     }
 
     fun testToolCallWithValidTool() = runBlocking {
