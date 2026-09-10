@@ -1,9 +1,11 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileStructureResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.StructureNode
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.TreeFormatter
@@ -30,7 +32,10 @@ class FileStructureTool : AbstractMcpTool() {
 
         Supports: Java, Kotlin, Python, JavaScript, TypeScript, PHP, Markdown
 
-        Returns: Formatted tree string with element types, modifiers, signatures, and line numbers.
+        Returns: The legacy formatted tree string plus structured nodes with element types,
+        modifiers, signatures, source ranges, children, and optional symbolId handles. All nodes
+        are returned; at most 500 handles are allocated per response. symbolIdsTruncated and
+        symbolIdsOmitted report nodes whose optional handle was omitted by this budget.
 
         Parameters: file (required) - Path relative to project root
 
@@ -61,22 +66,54 @@ class FileStructureTool : AbstractMcpTool() {
             // Extract structure
             val nodes = handler.getFileStructure(psiFile, project)
 
-            if (nodes.isEmpty()) {
-                return@suspendingReadAction createSuccessResult(
-                    "File is empty or has no parseable structure.\n\n" +
+            // Preserve the previous human-readable payload even when no nodes were found.
+            val treeString = if (nodes.isEmpty()) {
+                "File is empty or has no parseable structure.\n\n" +
                     "File: ${psiFile.name}\n" +
                     "Language: ${psiFile.language.id}"
-                )
+            } else {
+                TreeFormatter.format(nodes, psiFile.name, psiFile.language.id)
             }
-
-            // Format as tree
-            val treeString = TreeFormatter.format(nodes, psiFile.name, psiFile.language.id)
+            val bindingBudget = StructureBindingBudget(SymbolIdRegistry.getInstance().responseHandleBudget)
+            val structuredNodes = bindStructureNodes(project, nodes, bindingBudget)
 
             createJsonResult(FileStructureResult(
                 file = file,
                 language = psiFile.language.id,
-                structure = treeString
+                structure = treeString,
+                nodes = structuredNodes,
+                symbolIdsTruncated = bindingBudget.omitted > 0,
+                symbolIdsOmitted = bindingBudget.omitted
             ))
         }
     }
+
+    /**
+     * Attaches handles while the exact PSI elements produced by the language handler are still
+     * available. Re-resolving a node later by line would be ambiguous for overloads and nested
+     * declarations that share a line.
+     */
+    private class StructureBindingBudget(var remaining: Int, var omitted: Int = 0)
+
+    private fun bindStructureNodes(
+        project: Project,
+        nodes: List<StructureNode>,
+        budget: StructureBindingBudget
+    ): List<StructureNode> =
+        nodes.map { node ->
+            // Preorder gives containers a handle before their descendants. Keep the complete
+            // outline, but never evict IDs from this same response by overfilling the registry.
+            val target = node.pointerTarget?.takeIf { it.isValid }
+            val symbolId = if (target == null) null else if (budget.remaining > 0) {
+                budget.remaining--
+                bindSymbolId(project, target)
+            } else {
+                budget.omitted++
+                null
+            }
+            node.copy(
+                children = bindStructureNodes(project, node.children, budget),
+                symbolId = symbolId
+            )
+        }
 }

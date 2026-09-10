@@ -293,6 +293,7 @@ Build call tree showing who calls a method or what a method calls.
 **Returns**: `{ element: {name, file, line, column, language}, calls: [{name, file, line, column, language, children: [...]}] }`
 
 ### ide_file_structure (disabled by default)
+
 Get hierarchical file structure like IDE's Structure panel. Each element includes both start and end line numbers (e.g., `(lines 42-65)` for multi-line elements, `(line 42)` for single-line elements).
 
 | Parameter | Type | Required | Description |
@@ -300,7 +301,9 @@ Get hierarchical file structure like IDE's Structure panel. Each element include
 | `file` | string | yes | Relative file path |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ file, language, structure }` (formatted tree with types, modifiers, signatures, and start/end line numbers)
+**Returns**: `{ file, language, structure, nodes: [{name, kind, signature?, modifiers, line, endLine?, children, symbolId?}], symbolIdsTruncated, symbolIdsOmitted }`
+`structure` is retained for compatibility. `nodes` is the same hierarchy as structured data; IDs are bound to the exact extracted PSI elements rather than reconstructed from line numbers. Kotlin node kinds distinguish `INTERFACE`, `CLASS`, `ENUM`, `ANNOTATION`, and `OBJECT`.
+All nodes are retained; handles are limited to the first 500 eligible nodes in preorder. `symbolIdsTruncated` flags this handle budget and `symbolIdsOmitted` counts budget omissions. Query a handle-less node through targeted semantic discovery.
 **Languages**: Java, Kotlin, Python, JS/TS, PHP, Markdown.
 
 PHP support requires the PHP plugin and is available in PhpStorm or IntelliJ IDEA Ultimate with the PHP plugin enabled.

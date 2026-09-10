@@ -241,3 +241,10 @@ Cached searches keep `stale=true` after PSI edits and rebind exact smart pointer
 deleted targets and another project/session are rejected. Member edits return updated metadata.
 Kotlin abstract/sealed declarations retain `ABSTRACT_CLASS`; anonymous implementations have
 a useful source location without an invented qualified name.
+
+### Structured file outlines
+
+`ide_file_structure` keeps the formatted `structure` string and adds `nodes` with nested
+declarations, source ranges, signatures, modifiers, and optional exact `symbolId` handles.
+Large outlines retain all nodes and explicitly report `symbolIdsTruncated` and
+`symbolIdsOmitted` when their handle budget is exhausted.

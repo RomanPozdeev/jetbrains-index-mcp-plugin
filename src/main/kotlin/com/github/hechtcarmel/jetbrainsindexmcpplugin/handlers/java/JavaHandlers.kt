@@ -1149,12 +1149,12 @@ class JavaStructureHandler : BaseJavaHandler<List<StructureNode>>(), StructureHa
         }
 
         return StructureNode(
-            name = psiClass.name ?: "anonymous",
+            name = PsiUtils.classDisplayName(project, psiClass) ?: "anonymous",
             kind = when {
-                psiClass.isInterface -> StructureKind.INTERFACE
-                psiClass.isEnum -> StructureKind.ENUM
                 psiClass.isAnnotationType -> StructureKind.ANNOTATION
                 psiClass.isRecord -> StructureKind.RECORD
+                psiClass.isEnum -> StructureKind.ENUM
+                psiClass.isInterface -> StructureKind.INTERFACE
                 psiClass.hasModifierProperty("abstract") -> StructureKind.CLASS
                 else -> StructureKind.CLASS
             },
@@ -1162,7 +1162,8 @@ class JavaStructureHandler : BaseJavaHandler<List<StructureNode>>(), StructureHa
             signature = buildClassSignature(psiClass),
             line = line,
             endLine = endLine,
-            children = children.sortedBy { it.line }
+            children = children.sortedBy { it.line },
+            pointerTarget = psiClass
         )
     }
 
@@ -1175,7 +1176,8 @@ class JavaStructureHandler : BaseJavaHandler<List<StructureNode>>(), StructureHa
             modifiers = extractModifiers(field.modifierList),
             signature = field.type.presentableText,
             line = line,
-            endLine = endLine
+            endLine = endLine,
+            pointerTarget = field
         )
     }
 
@@ -1188,7 +1190,8 @@ class JavaStructureHandler : BaseJavaHandler<List<StructureNode>>(), StructureHa
             modifiers = extractModifiers(method.modifierList),
             signature = buildMethodSignature(method),
             line = line,
-            endLine = endLine
+            endLine = endLine,
+            pointerTarget = method
         )
     }
 
@@ -1422,7 +1425,8 @@ class KotlinStructureHandler : BaseJavaHandler<List<StructureNode>>(), Structure
                 endLine = getEndLineNumber(project, callExpr),
                 signature = name,
                 modifiers = emptyList(),
-                children = emptyList()
+                children = emptyList(),
+                pointerTarget = callExpr
             )
         } catch (_: Exception) {
             null
@@ -1478,7 +1482,8 @@ class KotlinStructureHandler : BaseJavaHandler<List<StructureNode>>(), Structure
             signature = buildKotlinClassSignature(ktClass),
             line = getLineNumber(project, ktClass) ?: 0,
             endLine = getEndLineNumber(project, ktClass),
-            children = children.sortedBy { it.line }
+            children = children.sortedBy { it.line },
+            pointerTarget = ktClass
         )
     }
 
@@ -1489,7 +1494,8 @@ class KotlinStructureHandler : BaseJavaHandler<List<StructureNode>>(), Structure
             modifiers = getKotlinModifiers(function),
             signature = buildKotlinFunctionSignature(function),
             line = getLineNumber(project, function) ?: 0,
-            endLine = getEndLineNumber(project, function)
+            endLine = getEndLineNumber(project, function),
+            pointerTarget = function
         )
     }
 
@@ -1500,7 +1506,8 @@ class KotlinStructureHandler : BaseJavaHandler<List<StructureNode>>(), Structure
             modifiers = getKotlinModifiers(property),
             signature = buildKotlinPropertySignature(property),
             line = getLineNumber(project, property) ?: 0,
-            endLine = getEndLineNumber(project, property)
+            endLine = getEndLineNumber(project, property),
+            pointerTarget = property
         )
     }
 
@@ -1511,7 +1518,8 @@ class KotlinStructureHandler : BaseJavaHandler<List<StructureNode>>(), Structure
             modifiers = getKotlinModifiers(obj),
             signature = "",
             line = getLineNumber(project, obj) ?: 0,
-            endLine = getEndLineNumber(project, obj)
+            endLine = getEndLineNumber(project, obj),
+            pointerTarget = obj
         )
     }
 
@@ -1527,6 +1535,8 @@ class KotlinStructureHandler : BaseJavaHandler<List<StructureNode>>(), Structure
     }
 
     private fun getClassKind(ktClass: PsiElement): StructureKind {
+        PsiUtils.kotlinClassKind(ktClass)?.let { return StructureKind.valueOf(it) }
+
         return try {
             val isInterfaceMethod = ktClass.javaClass.getMethod("isInterface")
             val isInterface = isInterfaceMethod.invoke(ktClass) as? Boolean == true

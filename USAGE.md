@@ -3131,11 +3131,49 @@ PHP support requires the PHP plugin and is available in PhpStorm or IntelliJ IDE
 {
   "file": "src/main/kotlin/com/example/UserService.kt",
   "language": "Kotlin",
-  "structure": "interface UserService (lines 15-18)\n  fun findUser(id: String): User (line 16)\n  fun deleteUser(id: String) (line 17)\n\nclass UserServiceImpl (lines 20-42)\n  val repository: UserRepository (line 21)\n  override fun findUser(id: String): User (lines 23-29)\n  override fun deleteUser(id: String) (lines 30-35)\n  private fun validate(id: String) (lines 37-41)"
+  "structure": "interface UserService (lines 15-18)\n  fun findUser(id: String): User (line 16)\n  fun deleteUser(id: String) (line 17)\n\nclass UserServiceImpl (lines 20-42)\n  val repository: UserRepository (line 21)\n  override fun findUser(id: String): User (lines 23-29)\n  override fun deleteUser(id: String) (lines 30-35)\n  private fun validate(id: String) (lines 37-41)",
+  "nodes": [
+    {
+      "name": "UserService",
+      "kind": "INTERFACE",
+      "modifiers": ["public"],
+      "signature": "interface UserService",
+      "line": 15,
+      "endLine": 18,
+      "symbolId": "sym_user-service",
+      "children": [
+        {
+          "name": "findUser",
+          "kind": "METHOD",
+          "modifiers": [],
+          "signature": "fun findUser(id: String): User",
+          "line": 16,
+          "endLine": 16,
+          "symbolId": "sym_find-user",
+          "children": []
+        }
+      ]
+    }
+  ]
 }
 ```
 
-**Note:** Each element in the structure output includes both start and end line numbers (e.g., `(lines 42-65)` for multi-line elements, `(line 42)` for single-line elements), making it easy to identify the full extent of each declaration.
+**Compatibility:** `structure` remains the original human-readable tree. `nodes` is an additive
+structured representation of the same hierarchy. Every node has `name`, `kind`, `signature`
+(nullable), `modifiers`, 1-based `line`, nullable `endLine`, `children`, and nullable `symbolId`.
+The ID is created from the exact PSI element while the structure is extracted; it is not recovered
+later from a line number.
+
+All nodes remain present even for large outlines. Only the first 500 eligible nodes in preorder
+receive handles in one response, preventing an outline from evicting its own early IDs.
+`symbolIdsTruncated` reports whether this budget was hit; `symbolIdsOmitted` counts eligible nodes
+left without a handle. Use a targeted semantic query for a node without an ID. The ordinary
+session/TTL/LRU rules still apply to returned handles.
+
+Each element in `structure` still includes both start and end line numbers (for example,
+`(lines 42-65)` for multi-line elements and `(line 42)` for single-line elements). Kotlin nodes use
+semantic kinds (`INTERFACE`, `CLASS`, `ENUM`, `ANNOTATION`, `OBJECT`) instead of inferring the kind
+from the common `KtClass` implementation type.
 
 ---
 

@@ -118,7 +118,10 @@
 ## FileStructureResult
   file: string
   language: string
+  nodes: array (optional)
   structure: string
+  symbolIdsOmitted: number (optional)
+  symbolIdsTruncated: boolean (optional)
 
 ## FindClassResult
   classes: array
@@ -445,6 +448,7 @@
   modifiers: array
   name: string
   signature: string?
+  symbolId: string? (optional)
 
 ## SuperMethodInfo
   column: number?
