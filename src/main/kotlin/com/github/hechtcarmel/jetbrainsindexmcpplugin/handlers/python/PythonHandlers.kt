@@ -9,6 +9,9 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.StructureKind
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.StructureNode
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PluginDetectors
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.project.IndexNotReadyException
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
@@ -16,6 +19,10 @@ import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.util.Processor
+import com.intellij.util.Query
+import java.lang.reflect.InvocationTargetException
+import kotlinx.coroutines.CancellationException
 
 /**
  * Registration entry point for Python language handlers.
@@ -65,6 +72,7 @@ object PythonHandlers {
         } catch (e: ClassNotFoundException) {
             LOG.warn("Python PSI classes not found, skipping registration: ${e.message}")
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Failed to register Python handlers: ${e.message}")
         }
     }
@@ -175,6 +183,7 @@ abstract class BasePythonHandler<T> : LanguageHandler<T> {
             val method = element.javaClass.getMethod("getName")
             method.invoke(element) as? String
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -187,6 +196,7 @@ abstract class BasePythonHandler<T> : LanguageHandler<T> {
             val method = element.javaClass.getMethod("getQualifiedName")
             method.invoke(element) as? String
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -203,6 +213,7 @@ abstract class BasePythonHandler<T> : LanguageHandler<T> {
             val method = pyClass.javaClass.getMethod("getSuperClasses", typeEvalContextClass)
             method.invoke(pyClass, context) as? Array<*>
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -230,6 +241,7 @@ abstract class BasePythonHandler<T> : LanguageHandler<T> {
                     return result
                 }
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 // Fall back to enumerating methods below.
             }
         }
@@ -239,6 +251,7 @@ abstract class BasePythonHandler<T> : LanguageHandler<T> {
             val methods = getMethodsMethod.invoke(pyClass) as? Array<*> ?: return null
             methods.filterIsInstance<PsiElement>().find { getName(it) == methodName }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -258,10 +271,12 @@ abstract class BasePythonHandler<T> : LanguageHandler<T> {
             val method = typeEvalContextClass.getMethod(factoryMethod, Project::class.java, PsiFile::class.java)
             method.invoke(null, project, origin)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             try {
                 val fallbackMethod = typeEvalContextClass.getMethod("codeInsightFallback", Project::class.java)
                 fallbackMethod.invoke(null, project)
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                failure.rethrowIfControlFlow()
                 null
             }
         }
@@ -289,13 +304,27 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
         element: PsiElement,
         project: Project,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        directOnly: Boolean,
+        direction: TypeHierarchyDirection?,
+        page: HierarchyPageRequest?
     ): TypeHierarchyData? {
         val pyClass = findContainingPyClass(element) ?: return null
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
-        val supertypes = getSupertypes(project, pyClass, searchScope = searchScope)
-        val subtypes = getSubtypes(project, pyClass, searchScope)
+        val collectionLimit = page?.collectionLimit ?: 100
+        val rawSupertypes = if (direction != TypeHierarchyDirection.SUBTYPE) {
+            getSupertypes(project, pyClass, searchScope = searchScope, directOnly = directOnly).take(page?.collectionLimit ?: Int.MAX_VALUE)
+        } else emptyList()
+        val rawSubtypes = if (direction != TypeHierarchyDirection.SUPERTYPE) {
+            getSubtypes(project, pyClass, searchScope, directOnly, collectionLimit)
+        } else emptyList()
+        val (supertypes, superNext) = if (direction == TypeHierarchyDirection.SUPERTYPE) {
+            rawSupertypes.applyHierarchyPage(page)
+        } else rawSupertypes to null
+        val (subtypes, subtypeNext) = if (direction == TypeHierarchyDirection.SUBTYPE) {
+            rawSubtypes.applyHierarchyPage(page)
+        } else rawSubtypes to null
 
         return TypeHierarchyData(
             element = TypeElementData(
@@ -304,10 +333,12 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
                 file = pyClass.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, pyClass),
                 kind = "CLASS",
-                language = "Python"
+                language = "Python",
+                pointerTarget = pyClass
             ),
             supertypes = supertypes,
-            subtypes = subtypes
+            subtypes = subtypes,
+            nextOffset = superNext ?: subtypeNext
         )
     }
 
@@ -316,7 +347,8 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
         pyClass: PsiElement,
         visited: MutableSet<String> = mutableSetOf(),
         depth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false
     ): List<TypeElementData> {
         if (depth > MAX_HIERARCHY_DEPTH) return emptyList()
 
@@ -335,7 +367,8 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
                     superName != "object" &&
                     shouldIncludeNavigationElement(searchScope, superClass)
                 ) {
-                    val superSupertypes = getSupertypes(project, superClass, visited, depth + 1, searchScope)
+                    val superSupertypes = if (directOnly) emptyList() else
+                        getSupertypes(project, superClass, visited, depth + 1, searchScope, directOnly = false)
                     supertypes.add(TypeElementData(
                         name = superName,
                         qualifiedName = getQualifiedName(superClass),
@@ -343,11 +376,13 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
                         line = getLineNumber(project, superClass),
                         kind = "CLASS",
                         language = "Python",
-                        supertypes = superSupertypes.takeIf { it.isNotEmpty() }
+                        supertypes = superSupertypes.takeIf { it.isNotEmpty() },
+                        pointerTarget = superClass
                     ))
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             // Handle gracefully
         }
 
@@ -357,30 +392,57 @@ class PythonTypeHierarchyHandler : BasePythonHandler<TypeHierarchyData>(), TypeH
     private fun getSubtypes(
         project: Project,
         pyClass: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false,
+        maxResults: Int = 100
+    ): List<TypeElementData> = collectSubtypes(
+        project,
+        searchScope,
+        maxResults,
+        includeCandidate = { candidate ->
+            !directOnly || isVisibleSubtypeOf(candidate, pyClass, searchScope) { parent ->
+                getSuperClasses(parent)?.filterIsInstance<PsiElement>().orEmpty()
+            }
+        }
+    ) {
+        val searchClass = Class.forName("com.jetbrains.python.psi.search.PyClassInheritorsSearch")
+        val searchMethod = searchClass.getMethod("search", pyClassClass, java.lang.Boolean.TYPE)
+        // Direct native children can all be outside the scope while a deeper descendant is
+        // included. Search deeply, then retain only nearest visible descendants for paged BFS.
+        searchMethod.invoke(null, pyClass, true) as? Query<*>
+    }
+
+    /** Collect a plugin query without turning an interrupted partial level into a complete one. */
+    internal fun collectSubtypes(
+        project: Project,
+        searchScope: GlobalSearchScope,
+        maxResults: Int,
+        includeCandidate: (PsiElement) -> Boolean = { true },
+        search: () -> Query<*>?
     ): List<TypeElementData> {
+        if (maxResults <= 0) return emptyList()
+
         return try {
-            val searchClass = Class.forName("com.jetbrains.python.psi.search.PyClassInheritorsSearch")
-            val searchMethod = searchClass.getMethod("search", pyClassClass, java.lang.Boolean.TYPE)
-            val query = searchMethod.invoke(null, pyClass, true)
-
-            val findAllMethod = query.javaClass.getMethod("findAll")
-            val inheritors = findAllMethod.invoke(query) as? Collection<*> ?: return emptyList()
-
-            inheritors.filterIsInstance<PsiElement>()
-                .filter { shouldIncludeNavigationElement(searchScope, it) }
-                .take(100)
-                .map { inheritor ->
-                    TypeElementData(
+            val inheritors = search() ?: return emptyList()
+            val results = mutableListOf<TypeElementData>()
+            inheritors.forEach(Processor { candidate ->
+                val inheritor = candidate as? PsiElement
+                if (inheritor != null && shouldIncludeNavigationElement(searchScope, inheritor) && includeCandidate(inheritor)) {
+                    results.add(TypeElementData(
                         name = getQualifiedName(inheritor) ?: getName(inheritor) ?: "unknown",
                         qualifiedName = getQualifiedName(inheritor),
                         file = inheritor.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                         line = getLineNumber(project, inheritor),
                         kind = "CLASS",
-                        language = "Python"
-                    )
+                        language = "Python",
+                        pointerTarget = inheritor
+                    ))
                 }
+                results.size < maxResults
+            })
+            results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             emptyList()
         }
     }
@@ -517,21 +579,25 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
         direction: String,
         depth: Int,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        page: HierarchyPageRequest?
     ): CallHierarchyData? {
         val pyFunction = findContainingPyFunction(element) ?: return null
         val visited = mutableSetOf<String>()
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
-        val calls = if (direction == "callers") {
-            findCallersRecursive(project, pyFunction, depth, visited, searchScope = searchScope)
+        val maxResults = page?.collectionLimit ?: MAX_RESULTS_PER_LEVEL
+        val rawCalls = if (direction == "callers") {
+            findCallersRecursive(project, pyFunction, depth, visited, searchScope = searchScope, maxResults = maxResults)
         } else {
-            findCalleesRecursive(project, pyFunction, depth, visited, searchScope = searchScope)
+            findCalleesRecursive(project, pyFunction, depth, visited, searchScope = searchScope, maxResults = maxResults)
         }
+        val (calls, nextOffset) = rawCalls.applyHierarchyPage(page)
 
         return CallHierarchyData(
             element = createCallElement(project, pyFunction),
-            calls = calls
+            calls = calls,
+            nextOffset = nextOffset
         )
     }
 
@@ -577,39 +643,62 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
+        if (maxResults <= 0) return emptyList()
 
         val functionKey = getFunctionKey(pyFunction)
         if (functionKey in visited) return emptyList()
         visited.add(functionKey)
 
-        val callers = mutableListOf<CallElementData>()
-        findDirectCallers(pyFunction)
-            .take(MAX_RESULTS_PER_LEVEL * 2)
-            .forEach { directCaller ->
-                if (directCaller == pyFunction || callers.size >= MAX_RESULTS_PER_LEVEL) return@forEach
-
-                val children = if (depth > 1) {
-                    findCallersRecursive(project, directCaller, depth - 1, visited, stackDepth + 1, searchScope)
-                } else null
-
-                if (shouldIncludeNavigationElement(searchScope, directCaller)) {
-                    callers.add(createCallElement(project, directCaller, children))
-                } else if (children != null) {
-                    children.forEach { child ->
-                        if (callers.size < MAX_RESULTS_PER_LEVEL) {
-                            callers.add(child)
-                        }
-                    }
-                }
-            }
-
-        return callers.distinctBy { it.name + it.file + it.line }.take(MAX_RESULTS_PER_LEVEL)
+        return collectIncludedCallers(
+            project, findDirectCallers(pyFunction), depth, visited, stackDepth, searchScope, maxResults
+        )
     }
 
-    private fun findDirectCallers(pyFunction: PsiElement): List<PsiElement> {
+    /** Scope filtering and semantic counting are independent of the optional native API lookup. */
+    internal fun collectIncludedCallers(
+        project: Project,
+        directCallers: Sequence<PsiElement>,
+        depth: Int,
+        visited: MutableSet<String>,
+        stackDepth: Int,
+        searchScope: GlobalSearchScope,
+        maxResults: Int
+    ): List<CallElementData> {
+        val callers = mutableListOf<CallElementData>()
+        val includedKeys = mutableSetOf<String>()
+        // The native API already returns a map. Consume it lazily until enough unique included
+        // callers exist; an arbitrary raw prefix cannot prove that the filtered search is over.
+        for (directCaller in directCallers) {
+            ProgressManager.checkCanceled()
+            if (callers.size >= maxResults) break
+
+            val children = if (depth > 1) {
+                findCallersRecursive(
+                    project, directCaller, depth - 1, visited, stackDepth + 1, searchScope, maxResults
+                )
+            } else null
+
+            val candidates = if (shouldIncludeNavigationElement(searchScope, directCaller)) {
+                listOf(createCallElement(project, directCaller, children))
+            } else {
+                children.orEmpty()
+            }
+            for (candidate in candidates) {
+                if (callers.size >= maxResults) break
+                val key = candidate.pointerTarget?.let(::getFunctionKey)
+                    ?: "${candidate.file}|${candidate.line}|${candidate.column}|${candidate.name}"
+                if (includedKeys.add(key)) callers.add(candidate)
+            }
+        }
+
+        return callers
+    }
+
+    private fun findDirectCallers(pyFunction: PsiElement): Sequence<PsiElement> {
         return findCallersUsingPyStaticHierarchy(pyFunction)
     }
 
@@ -617,14 +706,15 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
      * Mirrors PyCharm's own Python caller hierarchy implementation when the API is available.
      * This uses Python-specific find-usages semantics rather than generic ReferencesSearch.
      */
-    private fun findCallersUsingPyStaticHierarchy(pyFunction: PsiElement): List<PsiElement> {
+    private fun findCallersUsingPyStaticHierarchy(pyFunction: PsiElement): Sequence<PsiElement> {
         return try {
             val pyElementClass = Class.forName("com.jetbrains.python.psi.PyElement")
             val hierarchyUtilClass = Class.forName("com.jetbrains.python.hierarchy.call.PyStaticCallHierarchyUtil")
             val getCallersMethod = hierarchyUtilClass.getMethod("getCallers", pyElementClass)
 
-            val callers = getCallersMethod.invoke(null, pyFunction) as? Map<*, *> ?: return emptyList()
+            val callers = getCallersMethod.invoke(null, pyFunction) as? Map<*, *> ?: return emptySequence()
             callers.keys.asSequence()
+                .onEach { ProgressManager.checkCanceled() }
                 .filterIsInstance<PsiElement>()
                 .mapNotNull { caller ->
                     when {
@@ -633,8 +723,6 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
                     }
                 }
                 .filter { it != pyFunction }
-                .distinctBy { getFunctionKey(it) }
-                .toList()
         } catch (e: ClassNotFoundException) {
             throw IllegalStateException(
                 "Python caller hierarchy requires PyCharm's call hierarchy API, but it is unavailable in this IDE/Python plugin build.",
@@ -652,6 +740,13 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
                 e
             )
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
+            val cause = (e as? InvocationTargetException)?.targetException ?: e
+            when (cause) {
+                is ProcessCanceledException -> throw cause
+                is CancellationException -> throw cause
+                is IndexNotReadyException -> throw cause
+            }
             LOG.warn("Python call hierarchy API failed", e)
             throw IllegalStateException(
                 "Python caller hierarchy failed inside the IDE's Python call hierarchy API.",
@@ -666,41 +761,60 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
+        if (maxResults <= 0) return emptyList()
 
         val functionKey = getFunctionKey(pyFunction)
         if (functionKey in visited) return emptyList()
         visited.add(functionKey)
 
         val callees = mutableListOf<CallElementData>()
+        val includedKeys = mutableSetOf<String>()
         try {
             val pyCallExpr = pyCallExpressionClass ?: return emptyList()
-            @Suppress("UNCHECKED_CAST")
-            val callExpressions = PsiTreeUtil.findChildrenOfType(pyFunction, pyCallExpr as Class<out PsiElement>)
-
-            callExpressions.take(MAX_RESULTS_PER_LEVEL).forEach { callExpr ->
-                val calledFunction = resolveCallExpression(callExpr)
-                if (calledFunction != null && isPyFunction(calledFunction)) {
-                    val children = if (depth > 1) {
-                        findCalleesRecursive(project, calledFunction, depth - 1, visited, stackDepth + 1, searchScope)
-                    } else null
-                    if (shouldIncludeNavigationElement(searchScope, calledFunction)) {
-                        val element = createCallElement(project, calledFunction, children)
-                        if (callees.none { it.name == element.name && it.file == element.file }) {
-                            callees.add(element)
+            PsiTreeUtil.processElements(pyFunction) { candidate ->
+                if (pyCallExpr.isInstance(candidate)) {
+                    val calledFunction = resolveCallExpression(candidate)
+                    if (calledFunction != null && isPyFunction(calledFunction)) {
+                        val children = if (depth > 1) {
+                            findCalleesRecursive(
+                                project,
+                                calledFunction,
+                                depth - 1,
+                                visited,
+                                stackDepth + 1,
+                                searchScope,
+                                maxResults
+                            )
+                        } else null
+                        val candidates = if (shouldIncludeNavigationElement(searchScope, calledFunction)) {
+                            listOf(createCallElement(project, calledFunction, children))
+                        } else {
+                            children.orEmpty()
                         }
-                    } else if (children != null) {
-                        children.forEach { child ->
-                            if (callees.none { it.name == child.name && it.file == child.file }) {
-                                callees.add(child)
+                        for (callee in candidates) {
+                            if (callees.size >= maxResults) break
+                            val key = callee.pointerTarget?.let(::getFunctionKey)
+                                ?: "${callee.file}|${callee.line}|${callee.column}|${callee.name}"
+                            if (includedKeys.add(key)) {
+                                callees.add(callee)
                             }
                         }
                     }
                 }
+                callees.size < maxResults
             }
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IndexNotReadyException) {
+            throw e
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             // Handle gracefully
         }
         return callees
@@ -716,15 +830,18 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
             val reference = referenceMethod.invoke(callee) as? com.intellij.psi.PsiReference
             reference?.resolve()
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
 
     private fun getFunctionKey(pyFunction: PsiElement): String {
+        val file = pyFunction.containingFile?.virtualFile?.url
+        if (file != null) return "$file|${pyFunction.textOffset}"
         val containingClass = findContainingPyClass(pyFunction)
         val className = containingClass?.let { getQualifiedName(it) ?: getName(it) } ?: ""
         val functionName = getName(pyFunction) ?: ""
-        return "$className.$functionName"
+        return "$className.$functionName|${pyFunction.textOffset}"
     }
 
     private fun createCallElement(project: Project, pyFunction: PsiElement, children: List<CallElementData>? = null): CallElementData {
@@ -741,7 +858,8 @@ class PythonCallHierarchyHandler : BasePythonHandler<CallHierarchyData>(), CallH
             line = getLineNumber(project, pyFunction) ?: 0,
             column = getColumnNumber(project, pyFunction) ?: 0,
             language = "Python",
-            children = children?.takeIf { it.isNotEmpty() }
+            children = children?.takeIf { it.isNotEmpty() },
+            pointerTarget = pyFunction
         )
     }
 }
@@ -1130,6 +1248,7 @@ class PythonSymbolReferenceHandler(
         } catch (e: NoSuchMethodException) {
             runFindByShortNameAndFilter(indexClass, qName, project, scope)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("PyClassNameIndex lookup failed for '$qName': ${e.message}")
             emptyList()
         }
@@ -1142,6 +1261,7 @@ class PythonSymbolReferenceHandler(
                 .filterIsInstance<PsiNamedElement>()
                 .filter { getQualifiedNameReflective(it) == qName }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             emptyList()
         }
 
@@ -1169,6 +1289,7 @@ class PythonSymbolReferenceHandler(
             // Old SDK fallback: PyFunctionNameIndex.find(shortName, project, scope) + getQualifiedName filter.
             findFunctionsByShortNameAndFilterReflective(indexClass, qName, project, scope)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("PyFunctionNameIndex lookup failed for '$qName': ${e.message}")
             emptyList()
         }
@@ -1181,6 +1302,7 @@ class PythonSymbolReferenceHandler(
                 .filterIsInstance<PsiNamedElement>()
                 .filter { getQualifiedNameReflective(it) == qName }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             emptyList()
         }
 
@@ -1210,6 +1332,7 @@ class PythonSymbolReferenceHandler(
             } catch (e: NoSuchMethodException) {
                 multiFindMethodByNameReflective(pyClass, name, context)
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 multiFindMethodByNameReflective(pyClass, name, context)
             }
         }
@@ -1221,6 +1344,7 @@ class PythonSymbolReferenceHandler(
                 @Suppress("UNCHECKED_CAST")
                 (method.invoke(pyClass, name, true, context) as? List<*>)?.firstOrNull() as? PsiNamedElement
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 null
             }
         }
@@ -1233,6 +1357,7 @@ class PythonSymbolReferenceHandler(
             } catch (e: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 null
             }
         }
@@ -1244,6 +1369,7 @@ class PythonSymbolReferenceHandler(
             } catch (e: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 null
             }
         }
@@ -1260,6 +1386,7 @@ class PythonSymbolReferenceHandler(
             } catch (e: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 null
             }
         }
@@ -1271,6 +1398,7 @@ class PythonSymbolReferenceHandler(
             } catch (e: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 null
             }
         }
@@ -1278,12 +1406,14 @@ class PythonSymbolReferenceHandler(
         private fun projectScope(project: Project): GlobalSearchScope? = try {
             GlobalSearchScope.projectScope(project)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
 
         private fun allScope(project: Project): GlobalSearchScope? = try {
             GlobalSearchScope.allScope(project)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
 
@@ -1291,6 +1421,7 @@ class PythonSymbolReferenceHandler(
             val m = element.javaClass.getMethod("getQualifiedName")
             m.invoke(element) as? String
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
 
@@ -1300,6 +1431,7 @@ class PythonSymbolReferenceHandler(
                 val method = typeEvalContextClass.getMethod("codeInsightFallback", Project::class.java)
                 method.invoke(null, project)
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 null
             }
         }

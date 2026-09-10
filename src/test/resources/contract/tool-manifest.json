@@ -68,13 +68,14 @@ description:
   
   Rust note: "callers" direction works well; "callees" direction may have limited results due to Rust plugin PSI resolution constraints.
   
-  Returns: recursive tree with method signatures, file locations (line/column), and nested call relationships.
+  Returns a legacy nested tree. Set maxNodes for bounded BFS pages with nodeId/parentId/depth and symbolId handles. Follow cursor; if absent with hasMore=true, inspect truncationReason and narrow the query.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
-  Parameters: direction (required): "callers" or "callees". depth (optional, default: 3, max: 5). scope (optional, default: "project_files"; supported: project_files, project_and_libraries, project_production_files, project_test_files).
+  direction: callers or callees (required for fresh queries). depth: default 3, max 5. maxNodes: 1–500; omitted means legacy per-node limits, cursor pages default to 100. scope defaults to project_files.
   
   Example: {"file": "src/Service.java", "line": 42, "column": 10, "direction": "callers"}
   Example: {"language": "Java", "symbol": "com.example.Service#processRequest(String)", "direction": "callers", "scope": "project_and_libraries"}
@@ -89,6 +90,11 @@ schema:
         "description": "1-based column number",
         "type": "integer"
       },
+      "cursor":
+      {
+        "description": "Opaque session/project-bound continuation from the previous hierarchy page. Other search parameters are ignored.",
+        "type": "string"
+      },
       "depth":
       {
         "description": "How many levels deep to traverse the call hierarchy (default: 3, max: 5)",
@@ -96,7 +102,7 @@ schema:
       },
       "direction":
       {
-        "description": "Direction: 'callers' (methods that call this method) or 'callees' (methods this method calls)",
+        "description": "Direction for a fresh query: 'callers' or 'callees'. Omit when cursor is provided.",
         "enum":
         [
           "callers",
@@ -131,6 +137,11 @@ schema:
         "description": "1-based line number",
         "type": "integer"
       },
+      "maxNodes":
+      {
+        "description": "Opt into BFS paging with 1–500 nodes. Omit for a legacy tree; cursor default: 100.",
+        "type": "integer"
+      },
       "project_path":
       {
         "description": "Absolute project root; required with multiple open projects. For workspaces use the sub-project path.",
@@ -152,12 +163,64 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
-    "required":
-    [
-      "direction"
-    ],
     "type": "object"
   }
 
@@ -3420,9 +3483,9 @@ description:
   
   Rust note: className parameter not supported for Rust; use file + line + column instead.
   
-  Returns: target class info, full supertype chain (recursive), and all subtypes in the project.
+  Returns a legacy nested tree. Set maxNodes for bounded BFS pages with nodeId/parentId/depth and symbolId handles. Follow cursor; if absent with hasMore=true, inspect truncationReason and narrow the query.
   
-  Parameters: Either className (e.g., "com.example.MyClass" for Java/PHP-style FQNs or "MyComponent" for JavaScript/TypeScript symbols) OR file + line + column. scope (optional, default: "project_files"; supported: project_files, project_and_libraries, project_production_files, project_test_files).
+  Target: symbolId, className, file+line+column, or language+symbol. maxNodes: 1–500; omitted means legacy limits, cursor pages default to 100. scope defaults to project_files. Cursor ignores other search parameters.
   
   Example: {"className": "com.example.UserService", "scope": "project_and_libraries"} or {"file": "src/MyClass.java", "line": 10, "column": 14}
 schema:
@@ -3439,6 +3502,11 @@ schema:
         "description": "1-based column number. Required if using file parameter.",
         "type": "integer"
       },
+      "cursor":
+      {
+        "description": "Opaque session/project-bound continuation from the previous hierarchy page. Other search parameters are ignored.",
+        "type": "string"
+      },
       "file":
       {
         "description": "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). Use with line and column.",
@@ -3449,9 +3517,26 @@ schema:
         "description": "Include supertypes/subtypes defined in generated sources (KSP/Dagger/annotation-processor output). Default: true — keep generated types in the hierarchy.",
         "type": "boolean"
       },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
+        "type": "string"
+      },
       "line":
       {
         "description": "1-based line number where the class is defined. Required if using file parameter.",
+        "type": "integer"
+      },
+      "maxNodes":
+      {
+        "description": "Opt into BFS paging with 1–500 nodes. Omit for a legacy tree; cursor default: 100.",
         "type": "integer"
       },
       "project_path":
@@ -3470,6 +3555,67 @@ schema:
           "project_test_files"
         ],
         "type": "string"
+      },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"

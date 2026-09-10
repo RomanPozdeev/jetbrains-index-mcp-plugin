@@ -1,6 +1,6 @@
 # MCP tool response shapes — golden snapshot
 # Regenerate: ./gradlew test -Ptier=unit --tests "*ResultShapeContractUnitTest" -Dcontract.update=true
-# shapes: 71
+# shapes: 72
 
 ## ActiveFileInfo
   column: number?
@@ -37,14 +37,24 @@
 ## CallElement
   children: array? (optional)
   column: number
+  depth: number? (optional)
   file: string
   language: string? (optional)
   line: number
   name: string
+  nodeId: string? (optional)
+  parentId: string? (optional)
+  symbolId: string? (optional)
 
 ## CallHierarchyResult
   calls: array
+  cursor: string? (optional)
+  elapsedMs: number (optional)
   element: object
+  hasMore: boolean (optional)
+  returnedNodes: number (optional)
+  truncated: boolean (optional)
+  truncationReason: string? (optional)
 
 ## ChangeSignatureTool.ChangeSignatureResult
   affectedFiles: array (optional)
@@ -564,16 +574,31 @@
   line: number
 
 ## TypeElement
+  depth: number? (optional)
   file: string?
   kind: string
   language: string? (optional)
   name: string
+  nodeId: string? (optional)
+  parentId: string? (optional)
   supertypes: array? (optional)
+  symbolId: string? (optional)
 
 ## TypeHierarchyResult
+  cursor: string? (optional)
+  elapsedMs: number (optional)
   element: object
+  hasMore: boolean (optional)
+  returnedNodes: number (optional)
   subtypes: array
   supertypes: array
+  traversal: array (optional)
+  truncated: boolean (optional)
+  truncationReason: string? (optional)
+
+## TypeHierarchyTraversalNode
+  direction: string
+  element: object
 
 ## UsageInfo
   column: number

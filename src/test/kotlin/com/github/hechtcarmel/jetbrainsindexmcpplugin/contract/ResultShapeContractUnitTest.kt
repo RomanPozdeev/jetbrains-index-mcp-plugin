@@ -52,6 +52,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TestSummary
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TextMatch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TypeElement
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TypeHierarchyResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TypeHierarchyTraversalNode
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.UsageLocation
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ChangeSignatureTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ConversionStatus
@@ -427,15 +428,24 @@ class ResultShapeContractUnitTest : TestCase() {
             file = "src/main/java/com/example/Service.java",
             kind = "class",
             language = "JAVA",
+            symbolId = "sym_type",
+            nodeId = "n1",
+            parentId = "n0",
+            depth = 1,
             supertypes = listOf(
                 TypeElement(
                     name = "AbstractService",
                     file = "src/main/java/com/example/AbstractService.java",
                     kind = "class",
                     language = "JAVA",
+                    symbolId = "sym_supertype",
                     supertypes = null
                 )
             )
+        )
+        val typeHierarchyTraversalNode = TypeHierarchyTraversalNode(
+            direction = "supertype",
+            element = typeElement
         )
         val callElement = CallElement(
             name = "handle",
@@ -443,6 +453,10 @@ class ResultShapeContractUnitTest : TestCase() {
             line = 42,
             column = 17,
             language = "JAVA",
+            symbolId = "sym_call",
+            nodeId = "n1",
+            parentId = "n0",
+            depth = 1,
             children = listOf(
                 CallElement(
                     name = "validate",
@@ -450,6 +464,7 @@ class ResultShapeContractUnitTest : TestCase() {
                     line = 51,
                     column = 9,
                     language = "JAVA",
+                    symbolId = "sym_child_call",
                     children = null
                 )
             )
@@ -621,13 +636,33 @@ class ResultShapeContractUnitTest : TestCase() {
                 TypeHierarchyResult(
                     element = typeElement,
                     supertypes = listOf(typeElement),
-                    subtypes = listOf(typeElement)
+                    subtypes = listOf(typeElement),
+                    traversal = listOf(
+                        typeHierarchyTraversalNode,
+                        typeHierarchyTraversalNode.copy(direction = "subtype")
+                    ),
+                    returnedNodes = 2,
+                    truncated = true,
+                    elapsedMs = 37L,
+                    hasMore = true,
+                    cursor = "hier_type_page_2",
+                    truncationReason = "Narrow the hierarchy query to retain continuation state."
                 )
             ),
+            struct(TypeHierarchyTraversalNode.serializer(), typeHierarchyTraversalNode),
             struct(TypeElement.serializer(), typeElement),
             struct(
                 CallHierarchyResult.serializer(),
-                CallHierarchyResult(element = callElement, calls = listOf(callElement))
+                CallHierarchyResult(
+                    element = callElement,
+                    calls = listOf(callElement),
+                    returnedNodes = 1,
+                    truncated = true,
+                    elapsedMs = 29L,
+                    hasMore = true,
+                    cursor = "hier_call_page_2",
+                    truncationReason = "Narrow the hierarchy query to retain continuation state."
+                )
             ),
             struct(CallElement.serializer(), callElement),
             struct(

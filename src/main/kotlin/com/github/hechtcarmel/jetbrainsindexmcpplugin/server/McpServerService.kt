@@ -54,6 +54,9 @@ class McpServerService(
         ApplicationManager.getApplication().getService(PaginationService::class.java)
 
 
+    private val hierarchyContinuationRegistry: HierarchyContinuationRegistry =
+        HierarchyContinuationRegistry.getInstance()
+
     // Written under the instance monitor (startServer/stopServer), read lock-free from
     // status accessors on arbitrary threads — hence @Volatile.
     @Volatile private var ktorServer: KtorMcpServer? = null
@@ -241,6 +244,7 @@ class McpServerService(
         serverEpoch.advanceAndReset {
             symbolIdRegistry.clearForSessionReset()
             paginationService.clearForSessionReset()
+            hierarchyContinuationRegistry.clearForSessionReset()
         }
     }
 

@@ -5,6 +5,8 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.*
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PluginDetectors
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.project.IndexNotReadyException
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
@@ -13,6 +15,7 @@ import com.intellij.psi.search.searches.DefinitionsScopedSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.Processor
+import kotlinx.coroutines.CancellationException
 
 /**
  * Registration entry point for Go language handlers.
@@ -87,6 +90,7 @@ object GoHandlers {
         } catch (e: ClassNotFoundException) {
             LOG.warn("Go PSI classes not found, skipping registration: ${e.message}")
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Failed to register Go handlers: ${e.message}")
         }
     }
@@ -274,6 +278,7 @@ abstract class BaseGoHandler<T> : LanguageHandler<T> {
             val method = element.javaClass.getMethod("getName")
             method.invoke(element) as? String
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -286,6 +291,7 @@ abstract class BaseGoHandler<T> : LanguageHandler<T> {
             val method = element.javaClass.getMethod("getQualifiedName")
             method.invoke(element) as? String
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             // Fallback to just the name
             getName(element)
         }
@@ -299,6 +305,7 @@ abstract class BaseGoHandler<T> : LanguageHandler<T> {
             val method = goTypeSpec.javaClass.getMethod("getSpecType")
             method.invoke(goTypeSpec) as? PsiElement
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -355,15 +362,30 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
         element: PsiElement,
         project: Project,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        directOnly: Boolean,
+        direction: TypeHierarchyDirection?,
+        page: HierarchyPageRequest?
     ): TypeHierarchyData? {
         val goType = findContainingGoType(element) ?: return null
         LOG.debug("Getting type hierarchy for Go type: ${getName(goType)}")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
         val specType = getSpecType(goType)
-        val supertypes = getSupertypes(project, goType, specType, searchScope = searchScope)
-        val subtypes = getSubtypes(project, goType, specType, searchScope)
+        val collectionLimit = page?.collectionLimit ?: 100
+        val rawSupertypes = if (direction != TypeHierarchyDirection.SUBTYPE) {
+            getSupertypes(project, goType, specType, searchScope = searchScope, directOnly = directOnly)
+                .take(page?.collectionLimit ?: Int.MAX_VALUE)
+        } else emptyList()
+        val rawSubtypes = if (direction != TypeHierarchyDirection.SUPERTYPE) {
+            getSubtypes(project, goType, specType, searchScope, collectionLimit)
+        } else emptyList()
+        val (supertypes, superNext) = if (direction == TypeHierarchyDirection.SUPERTYPE) {
+            rawSupertypes.applyHierarchyPage(page)
+        } else rawSupertypes to null
+        val (subtypes, subtypeNext) = if (direction == TypeHierarchyDirection.SUBTYPE) {
+            rawSubtypes.applyHierarchyPage(page)
+        } else rawSubtypes to null
 
         LOG.debug("Found ${supertypes.size} supertypes and ${subtypes.size} subtypes")
 
@@ -374,10 +396,12 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
                 file = goType.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, goType),
                 kind = determineTypeKind(goType),
-                language = "Go"
+                language = "Go",
+                pointerTarget = goType
             ),
             supertypes = supertypes,
-            subtypes = subtypes
+            subtypes = subtypes,
+            nextOffset = superNext ?: subtypeNext
         )
     }
 
@@ -387,7 +411,8 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
         specType: PsiElement?,
         visited: MutableSet<String> = mutableSetOf(),
         depth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false
     ): List<TypeElementData> {
         if (depth > MAX_HIERARCHY_DEPTH) return emptyList()
 
@@ -401,14 +426,15 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
             when {
                 specType != null && isGoStructType(specType) -> {
                     // For structs, look for embedded types
-                    supertypes.addAll(getEmbeddedTypes(project, specType, visited, depth, searchScope))
+                    supertypes.addAll(getEmbeddedTypes(project, specType, visited, depth, searchScope, directOnly))
                 }
                 specType != null && isGoInterfaceType(specType) -> {
                     // For interfaces, look for embedded interfaces
-                    supertypes.addAll(getEmbeddedInterfaces(project, specType, visited, depth, searchScope))
+                    supertypes.addAll(getEmbeddedInterfaces(project, specType, visited, depth, searchScope, directOnly))
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error getting supertypes: ${e.message}")
         }
 
@@ -420,7 +446,8 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
         structType: PsiElement,
         visited: MutableSet<String>,
         depth: Int,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean
     ): List<TypeElementData> {
         val embeddedTypes = mutableListOf<TypeElementData>()
 
@@ -444,13 +471,14 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
                                 isGoTypeSpec(resolvedType) &&
                                 shouldIncludeNavigationElement(searchScope, resolvedType)
                             ) {
-                                val superSupertypes = getSupertypes(
+                                val superSupertypes = if (directOnly) emptyList() else getSupertypes(
                                     project,
                                     resolvedType,
                                     getSpecType(resolvedType),
                                     visited,
                                     depth + 1,
-                                    searchScope
+                                    searchScope,
+                                    directOnly = false
                                 )
                                 embeddedTypes.add(TypeElementData(
                                     name = getQualifiedName(resolvedType) ?: embeddedTypeName,
@@ -459,16 +487,19 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
                                     line = getLineNumber(project, resolvedType),
                                     kind = determineTypeKind(resolvedType),
                                     language = "Go",
-                                    supertypes = superSupertypes.takeIf { it.isNotEmpty() }
+                                    supertypes = superSupertypes.takeIf { it.isNotEmpty() },
+                                    pointerTarget = resolvedType
                                 ))
                             }
                         }
                     }
                 } catch (e: Exception) {
+                    e.rethrowIfControlFlow()
                     // Field might not have anonymous field definition
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error getting embedded types: ${e.message}")
         }
 
@@ -480,7 +511,8 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
         interfaceType: PsiElement,
         visited: MutableSet<String>,
         depth: Int,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean
     ): List<TypeElementData> {
         val embeddedInterfaces = mutableListOf<TypeElementData>()
 
@@ -503,13 +535,14 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
                             isGoTypeSpec(resolvedType) &&
                             shouldIncludeNavigationElement(searchScope, resolvedType)
                         ) {
-                            val superSupertypes = getSupertypes(
+                            val superSupertypes = if (directOnly) emptyList() else getSupertypes(
                                 project,
                                 resolvedType,
                                 getSpecType(resolvedType),
                                 visited,
                                 depth + 1,
-                                searchScope
+                                searchScope,
+                                directOnly = false
                             )
                             embeddedInterfaces.add(TypeElementData(
                                 name = getQualifiedName(resolvedType) ?: embeddedName,
@@ -518,15 +551,18 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
                                 line = getLineNumber(project, resolvedType),
                                 kind = "INTERFACE",
                                 language = "Go",
-                                supertypes = superSupertypes.takeIf { it.isNotEmpty() }
+                                supertypes = superSupertypes.takeIf { it.isNotEmpty() },
+                                pointerTarget = resolvedType
                             ))
                         }
                     }
                 }
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 // Method might not exist in all versions
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error getting embedded interfaces: ${e.message}")
         }
 
@@ -539,6 +575,7 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
             val reference = referenceMethod.invoke(element) as? com.intellij.psi.PsiReference
             reference?.resolve()
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -547,7 +584,8 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
         project: Project,
         goType: PsiElement,
         specType: PsiElement?,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<TypeElementData> {
         // Use DefinitionsScopedSearch for finding implementing types
         try {
@@ -561,15 +599,17 @@ class GoTypeHierarchyHandler : BaseGoHandler<TypeHierarchyData>(), TypeHierarchy
                         file = definition.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                         line = getLineNumber(project, definition),
                         kind = determineTypeKind(definition),
-                        language = "Go"
+                        language = "Go",
+                        pointerTarget = definition
                     ))
                 }
-                results.size < 100
+                results.size < maxResults
             })
 
             LOG.debug("Found ${results.size} subtypes via DefinitionsScopedSearch")
             return results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error getting subtypes: ${e.message}")
             return emptyList()
         }
@@ -724,24 +764,28 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
         direction: String,
         depth: Int,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        page: HierarchyPageRequest?
     ): CallHierarchyData? {
         val goFunction = findContainingGoFunction(element) ?: return null
         LOG.debug("Getting call hierarchy for ${getName(goFunction)}, direction=$direction, depth=$depth")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
         val visited = mutableSetOf<String>()
-        val calls = if (direction == "callers") {
-            findCallersRecursive(project, goFunction, depth, visited, searchScope = searchScope)
+        val maxResults = page?.collectionLimit ?: MAX_RESULTS_PER_LEVEL
+        val rawCalls = if (direction == "callers") {
+            findCallersRecursive(project, goFunction, depth, visited, searchScope = searchScope, maxResults = maxResults)
         } else {
-            findCalleesRecursive(project, goFunction, depth, visited, searchScope = searchScope)
+            findCalleesRecursive(project, goFunction, depth, visited, searchScope = searchScope, maxResults = maxResults)
         }
+        val (calls, nextOffset) = rawCalls.applyHierarchyPage(page)
 
         LOG.debug("Found ${calls.size} $direction")
 
         return CallHierarchyData(
             element = createCallElement(project, goFunction),
-            calls = calls
+            calls = calls,
+            nextOffset = nextOffset
         )
     }
 
@@ -751,43 +795,67 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
+        if (maxResults <= 0) return emptyList()
 
         val functionKey = getFunctionKey(goFunction)
         if (functionKey in visited) return emptyList()
         visited.add(functionKey)
 
         return try {
-            // Use platform ReferencesSearch API with Processor pattern
-            val references = mutableListOf<com.intellij.psi.PsiReference>()
+            val results = mutableListOf<CallElementData>()
+            val seenCallers = mutableSetOf<String>()
+            val seenResults = mutableSetOf<String>()
 
             ReferencesSearch.search(goFunction, searchScope).forEach(Processor { reference ->
-                references.add(reference)
-                references.size < MAX_RESULTS_PER_LEVEL * 2
-            })
-
-            LOG.debug("Found ${references.size} references for ${getName(goFunction)}")
-
-            val results = mutableListOf<CallElementData>()
-            for (reference in references) {
-                if (results.size >= MAX_RESULTS_PER_LEVEL) break
                 val refElement = reference.element
                 val containingFunction = findContainingGoFunction(refElement)
                 if (containingFunction != null && containingFunction != goFunction) {
-                    val children = if (depth > 1) {
-                        findCallersRecursive(project, containingFunction, depth - 1, visited, stackDepth + 1, searchScope)
-                    } else null
-                    if (shouldIncludeNavigationElement(searchScope, containingFunction)) {
-                        results.add(createCallElement(project, containingFunction, children))
-                    } else if (children != null) {
-                        results.addAll(children)
+                    val callerPath = containingFunction.containingFile?.virtualFile?.path.orEmpty()
+                    val callerIdentity =
+                        "$callerPath:${containingFunction.textOffset}:${getFunctionKey(containingFunction)}"
+                    if (seenCallers.add(callerIdentity)) {
+                        val children = if (depth > 1) {
+                            findCallersRecursive(
+                                project,
+                                containingFunction,
+                                depth - 1,
+                                visited,
+                                stackDepth + 1,
+                                searchScope,
+                                maxResults
+                            )
+                        } else null
+                        val candidates = if (shouldIncludeNavigationElement(searchScope, containingFunction)) {
+                            listOf(createCallElement(project, containingFunction, children))
+                        } else {
+                            children.orEmpty()
+                        }
+                        for (candidate in candidates) {
+                            if (results.size >= maxResults) break
+                            val resultIdentity = "${candidate.name}:${candidate.file}:${candidate.line}"
+                            if (seenResults.add(resultIdentity)) {
+                                results.add(candidate)
+                            }
+                        }
                     }
                 }
-            }
-            results.distinctBy { it.name + it.file + it.line }.take(MAX_RESULTS_PER_LEVEL)
+                results.size < maxResults
+            })
+
+            LOG.debug("Found ${results.size} callers for ${getName(goFunction)}")
+            results
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IndexNotReadyException) {
+            throw e
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Error finding callers: ${e.message}")
             emptyList()
         }
@@ -799,7 +867,8 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
 
@@ -813,11 +882,14 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
             @Suppress("UNCHECKED_CAST")
             val callExpressions = PsiTreeUtil.findChildrenOfType(goFunction, goCallExpr as Class<out PsiElement>)
 
-            callExpressions.take(MAX_RESULTS_PER_LEVEL).forEach { callExpr ->
+            for (callExpr in callExpressions) {
+                if (callees.size >= maxResults) break
                 val calledFunction = resolveCallExpression(callExpr)
                 if (calledFunction != null && (isGoFunction(calledFunction) || isGoMethod(calledFunction))) {
                     val children = if (depth > 1) {
-                        findCalleesRecursive(project, calledFunction, depth - 1, visited, stackDepth + 1, searchScope)
+                        findCalleesRecursive(
+                            project, calledFunction, depth - 1, visited, stackDepth + 1, searchScope, maxResults
+                        )
                     } else null
                     if (shouldIncludeNavigationElement(searchScope, calledFunction)) {
                         val element = createCallElement(project, calledFunction, children)
@@ -834,6 +906,7 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error finding callees: ${e.message}")
         }
         return callees
@@ -849,6 +922,7 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
             val reference = referenceMethod.invoke(expression) as? com.intellij.psi.PsiReference
             reference?.resolve()
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -872,6 +946,7 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
                 val receiverTypeName = receiver?.let { getReceiverTypeName(it) }
                 if (receiverTypeName != null) "$receiverTypeName.$functionName" else functionName
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 functionName
             }
         } else {
@@ -884,7 +959,8 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
             line = getLineNumber(project, goFunction) ?: 0,
             column = getColumnNumber(project, goFunction) ?: 0,
             language = "Go",
-            children = children?.takeIf { it.isNotEmpty() }
+            children = children?.takeIf { it.isNotEmpty() },
+            pointerTarget = goFunction
         )
     }
 
@@ -894,6 +970,7 @@ class GoCallHierarchyHandler : BaseGoHandler<CallHierarchyData>(), CallHierarchy
             val typeElement = getTypeMethod.invoke(receiver) as? PsiElement
             typeElement?.text?.trim('*', ' ')
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }

@@ -71,6 +71,8 @@ dependencies {
     implementation(libs.mcp.kotlin.sdk.server) { excludePlatformProvided() }
 
     implementation(libs.jtoon)
+    // Persistent hierarchy histories share unchanged storage across retriable cursor pages.
+    implementation(libs.kotlinx.collections.immutable) { excludePlatformProvided() }
 
     // Ktor engine. ktor-server-core arrives transitively from the SDK at the version the SDK was
     // compiled against, which is exactly what we want. CORS is not a dependency: the plugin

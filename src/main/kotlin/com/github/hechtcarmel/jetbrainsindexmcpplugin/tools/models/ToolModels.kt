@@ -140,7 +140,22 @@ data class ReadFileResult(
 data class TypeHierarchyResult(
     val element: TypeElement,
     val supertypes: List<TypeElement>,
-    val subtypes: List<TypeElement>
+    val subtypes: List<TypeElement>,
+    /** Exact breadth-first wire order; legacy direction-specific arrays remain for compatibility. */
+    val traversal: List<TypeHierarchyTraversalNode> = emptyList(),
+    val returnedNodes: Int = 0,
+    val truncated: Boolean = false,
+    val elapsedMs: Long = 0,
+    val hasMore: Boolean = false,
+    val cursor: String? = null,
+    /** Terminal resource limit: results remain usable, but the query must be narrowed to continue. */
+    val truncationReason: String? = null
+)
+
+@Serializable
+data class TypeHierarchyTraversalNode(
+    val direction: String,
+    val element: TypeElement
 )
 
 @Serializable
@@ -149,14 +164,25 @@ data class TypeElement(
     val file: String?,
     val kind: String,
     val language: String? = null,
-    val supertypes: List<TypeElement>? = null
+    val symbolId: String? = null,
+    val supertypes: List<TypeElement>? = null,
+    /** Traversal-local identity, independent of non-canonical symbol handles. */
+    val nodeId: String? = null,
+    val parentId: String? = null,
+    val depth: Int? = null
 )
 
 // call_hierarchy output
 @Serializable
 data class CallHierarchyResult(
     val element: CallElement,
-    val calls: List<CallElement>
+    val calls: List<CallElement>,
+    val returnedNodes: Int = 0,
+    val truncated: Boolean = false,
+    val elapsedMs: Long = 0,
+    val hasMore: Boolean = false,
+    val cursor: String? = null,
+    val truncationReason: String? = null
 )
 
 @Serializable
@@ -166,7 +192,12 @@ data class CallElement(
     val line: Int,
     val column: Int,
     val language: String? = null,
-    val children: List<CallElement>? = null
+    val symbolId: String? = null,
+    val children: List<CallElement>? = null,
+    /** Parent in the breadth-first discovery tree; stable across pages and handle eviction. */
+    val nodeId: String? = null,
+    val parentId: String? = null,
+    val depth: Int? = null
 )
 
 // find_implementations output
