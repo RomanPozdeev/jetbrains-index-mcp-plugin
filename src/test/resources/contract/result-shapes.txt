@@ -1,6 +1,6 @@
 # MCP tool response shapes — golden snapshot
 # Regenerate: ./gradlew test -Ptier=unit --tests "*ResultShapeContractUnitTest" -Dcontract.update=true
-# shapes: 69
+# shapes: 70
 
 ## ActiveFileInfo
   column: number?
@@ -87,10 +87,12 @@
   buildErrorsTruncated: boolean? (optional)
   buildTimestamp: number? (optional)
   buildWarningCount: number? (optional)
+  fileAnalyses: array? (optional)
   intentionCount: number? (optional)
   intentions: array? (optional)
   problemCount: number? (optional)
   problems: array? (optional)
+  problemsTruncated: boolean? (optional)
   testResults: array? (optional)
   testResultsTruncated: boolean? (optional)
   testSummary: object? (optional)
@@ -107,6 +109,15 @@
   file: string
   reason: string? (optional)
   state: string
+
+## FileDiagnosticsAnalysis
+  file: string
+  fresh: boolean
+  message: string? (optional)
+  mode: string? (optional)
+  problemCount: number (optional)
+  problemsTruncated: boolean (optional)
+  timedOut: boolean
 
 ## FileMatch
   directory: string

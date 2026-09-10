@@ -129,7 +129,7 @@ When working in a git worktree (e.g., `/project/.claude/worktrees/agent-xyz` or 
 4. `ide_replace_text_in_file`, `ide_reformat_code` - apply project code style (disabled by default)
 
 ### "I need to check for problems"
-1. `ide_diagnostics` - compiler errors, warnings, quick fixes for one file (plus build/test results)
+1. `ide_diagnostics` - compiler errors/warnings for one `file` or a small `files` batch; quick fixes and ranges are single-file only (plus build/test results)
 2. `ide_project_diagnostics` - batch/project scope including unopened files, with fail-closed coverage metadata (`complete` flag, per-file states); long analyses return an `analysisId` to poll (disabled by default)
 
 ### "I need to find implementations of an interface"

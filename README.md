@@ -273,7 +273,7 @@ These tools work in all supported JetBrains IDEs.
 | `ide_find_file` | Search for files by name using IDE's file index |
 | `ide_find_symbol` | Search for symbols (classes, methods, fields, functions) by name with IntelliJ Go to Symbol matching *(disabled by default)* |
 | `ide_search_text` | Text search using IntelliJ Find in Files with context filtering (substring and regex matching), optionally restricted to path globs via `paths` |
-| `ide_diagnostics` | Analyze file problems with fresh editor diagnostics for open files or public batch diagnostics for closed files, plus optional build/test results; intentions are best-effort |
+| `ide_diagnostics` | Analyze one `file` or up to 100 unique `files` under one shared timeout budget, with fresh editor diagnostics for open files or public batch diagnostics for closed files, plus optional build/test results; intentions are best-effort and single-file only |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata: a `complete` flag plus per-file `analyzed`/`timed_out`/`failed`/`skipped`/`not_analyzed` states, so an empty result can never be mistaken for a clean project. Long analyses return an `analysisId` to poll *(disabled by default)* |
 | `ide_index_status` | Check if the IDE is in dumb mode or smart mode |
 | `ide_sync_files` | Force sync IDE's virtual file system and PSI cache with external file changes |
