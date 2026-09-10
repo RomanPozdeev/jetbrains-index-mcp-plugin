@@ -19,10 +19,13 @@ import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.util.TextRange
+import com.intellij.openapi.vcs.CodeSmellDetector
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiManager
 import com.intellij.testFramework.IndexingTestUtil
 import com.intellij.testFramework.PsiTestUtil
+import com.intellij.testFramework.replaceService
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -33,6 +36,9 @@ import kotlinx.serialization.json.put
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -127,6 +133,52 @@ class GetDiagnosticsToolBehaviorTest : BasePlatformTestCase() {
         } finally {
             service.analysisTimeoutMsOverride = originalTimeout
             service.closedFileAnalysisOverride = originalRunner
+        }
+    }
+
+    fun testBlockingDetectorTimesOutAndReleasesTheAnalysisLock() = runBlocking {
+        createProjectFile("BlockingDetector.java", "class BlockingDetector {}")
+        val service = DiagnosticsAnalysisService.getInstance(project)
+        val originalTimeout = service.analysisTimeoutMsOverride
+        val entered = AtomicBoolean()
+        val exited = AtomicBoolean()
+        project.replaceService(CodeSmellDetector::class.java, object : CodeSmellDetector() {
+            override fun findCodeSmells(files: List<VirtualFile>): List<CodeSmellInfo> {
+                if (entered.compareAndSet(false, true)) {
+                    try {
+                        // Model the blocking wait inside MainPassesRunner, not a suspend delay.
+                        CountDownLatch(1).await(5, TimeUnit.SECONDS)
+                    } finally {
+                        exited.set(true)
+                    }
+                }
+                return emptyList()
+            }
+
+            override fun showCodeSmellErrors(smells: List<CodeSmellInfo>) = Unit
+        }, testRootDisposable)
+        try {
+            service.analysisTimeoutMsOverride = 300L
+            val startedAt = System.nanoTime()
+            val result = GetDiagnosticsTool().execute(project, buildJsonObject {
+                put("file", "src/BlockingDetector.java")
+            })
+            assertFalse("Timeout must be reported in-band: ${renderResult(result)}", result.isFailure)
+            assertTrue("The detector must actually run", entered.get())
+            assertTrue("The worker must exit before the analysis lock is released", exited.get())
+            assertTrue(decodeDiagnostics(result).analysisTimedOut == true)
+            assertTrue("Blocking analysis exceeded its budget",
+                System.nanoTime() - startedAt < TimeUnit.SECONDS.toNanos(3))
+
+            service.analysisTimeoutMsOverride = 3_000L
+            val next = GetDiagnosticsTool().execute(project, buildJsonObject {
+                put("file", "src/BlockingDetector.java")
+            })
+            assertFalse("The next analysis must succeed: ${renderResult(next)}", next.isFailure)
+            assertTrue("The cancelled operation must not hold the main-pass lock",
+                decodeDiagnostics(next).analysisFresh == true)
+        } finally {
+            service.analysisTimeoutMsOverride = originalTimeout
         }
     }
 

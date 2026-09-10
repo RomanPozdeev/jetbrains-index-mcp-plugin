@@ -16,16 +16,14 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.lifecycle.ProjectModeService
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ClassResolver
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.cancellableEdtAction
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiUtils
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiSourcePosition
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ResponseFormatter
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.EDT
-import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
-import com.intellij.openapi.application.asContextElement
 import com.intellij.openapi.application.readAction as platformReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Document
@@ -46,8 +44,6 @@ import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.util.PsiModificationTracker
 import com.intellij.usageView.UsageViewUtil
 import com.intellij.util.concurrency.annotations.RequiresReadLock
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -171,11 +167,7 @@ abstract class AbstractMcpTool : McpTool {
      * or other scenarios where the EDT is already the current thread.
      */
     protected suspend fun <T> edtAction(action: () -> T): T {
-        return if (ApplicationManager.getApplication().isDispatchThread) {
-            action()
-        } else {
-withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { action() }
-        }
+        return cancellableEdtAction(action)
     }
 
     /**
@@ -187,12 +179,8 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
      * submission inherited from the caller.
      */
     protected suspend fun commitDocuments(project: Project) {
-        if (ApplicationManager.getApplication().isDispatchThread) {
+        edtAction {
             PsiDocumentManager.getInstance(project).commitAllDocuments()
-        } else {
-            withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) {
-                PsiDocumentManager.getInstance(project).commitAllDocuments()
-            }
         }
     }
 

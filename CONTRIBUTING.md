@@ -457,7 +457,9 @@ call sites". It is thin in these areas:
   hierarchy and call-hierarchy handlers have no automated coverage at all — verify changes to them
   in the corresponding IDE by hand.
 - **Real Kotlin PSI tests are opt-in.** `-PkotlinPluginTests=true` loads the bundled Kotlin plugin
-  for tests. `KotlinRenameBaseBehaviorTest` covers headless base selection, Kotlin/Java interfaces,
+  for tests. `KotlinReplaceMemberFormattingBehaviorTest` exercises block/expression bodies and
+  property initializers, exact saved text, returned body lines, and full-file formatter idempotence.
+  `KotlinRenameBaseBehaviorTest` covers headless base selection, Kotlin/Java interfaces,
   overrides and call sites, handles from super-method queries, preview with and without a base,
   and aborting failed discovery. It guards the interactive entry point because Kotlin's unit-test
   mode auto-confirms the super-method chooser. Other Kotlin-specific paths still need dedicated
@@ -473,6 +475,8 @@ call sites". It is thin in these areas:
   a retained light method can report the old signature after successful source edits.
   Extension/suspend parameter mapping, Kotlin-only type syntax, and other change-signature
   options still lack dedicated Kotlin behavior coverage.
+  The `src/kotlinPluginTest/kotlin` fixtures are added to the test sources only with this flag;
+  run the command above when changing Kotlin editing or refactoring.
 - **Some tools are still never executed by any test**, only schema- and response-shape-checked:
   `ide_build_project`, `ide_reload_project`, `ide_import_modules`, `ide_open_workspace`,
   `ide_restart`, `ide_lifecycle_log`, `ide_set_lifecycle_log_file`, and `ide_run_tests` (only its

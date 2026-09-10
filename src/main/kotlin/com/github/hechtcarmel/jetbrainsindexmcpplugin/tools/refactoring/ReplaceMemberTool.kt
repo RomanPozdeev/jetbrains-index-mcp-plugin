@@ -242,13 +242,30 @@ class ReplaceMemberTool : AbstractMcpTool() {
             }
 
             prep.document.replaceString(bodyStart, bodyEnd, content)
-            MemberEditingUtils.commitDocuments(project)
-            if (reformat) {
-                MemberEditingUtils.reformatRange(project, prep.psiFile, bodyStart, bodyStart + content.length)
+            val editedRange = prep.document.createRangeMarker(bodyStart, bodyStart + content.length)
+            try {
                 MemberEditingUtils.commitDocuments(project)
+                if (reformat) {
+                    // Format the complete declaration, including its closing delimiter. A range
+                    // ending at the inserted text leaves Kotlin's `return 21}` unchanged.
+                    val declarationEnd = currentRange.endOffset + content.length - (bodyEnd - bodyStart)
+                    MemberEditingUtils.reformatRange(project, prep.psiFile, currentRange.startOffset, declarationEnd)
+                    MemberEditingUtils.commitDocuments(project)
+                }
+                // Formatting changes body length, and import optimization can move the whole
+                // declaration. Report the final PSI body, with a tracked range if PSI was lost.
+                val updatedMember = pointer.element?.let {
+                    MemberEditingUtils.getResolver(prep.psiFile, project)?.resolveMember(it)
+                }
+                val finalStart = updatedMember?.bodyStartOffset
+                    ?: if (editedRange.isValid) editedRange.startOffset else bodyStart
+                val finalEnd = updatedMember?.bodyEndOffset
+                    ?: if (editedRange.isValid) editedRange.endOffset else bodyStart + content.length
+                startLine = MemberEditingUtils.safeLineNumber(prep.document, finalStart)
+                endLine = MemberEditingUtils.safeLineNumber(prep.document, finalEnd)
+            } finally {
+                editedRange.dispose()
             }
-            startLine = MemberEditingUtils.safeLineNumber(prep.document, bodyStart)
-            endLine = MemberEditingUtils.safeLineNumber(prep.document, bodyStart + content.length)
         }
 
         if (error != null) {
