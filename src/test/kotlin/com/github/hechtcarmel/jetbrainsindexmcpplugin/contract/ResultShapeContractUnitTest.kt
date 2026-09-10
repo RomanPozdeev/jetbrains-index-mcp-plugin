@@ -8,6 +8,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.CallElement
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.CallHierarchyResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.DefinitionResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.DiagnosticsResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileDiagnosticsAnalysis
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileCoverageInfo
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileMatch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FileStructureResult
@@ -403,6 +404,15 @@ class ResultShapeContractUnitTest : TestCase() {
             state = "timed_out",
             reason = "File analysis timed out."
         )
+        val fileDiagnosticsAnalysis = FileDiagnosticsAnalysis(
+            file = "src/main/java/com/example/Service.java",
+            mode = "closed_batch",
+            fresh = true,
+            timedOut = true,
+            message = "Analysis completed using the shared deadline.",
+            problemCount = 1,
+            problemsTruncated = true
+        )
         val testResultInfo = TestResultInfo(
             name = "testHandle",
             suite = "com.example.ServiceTest",
@@ -630,11 +640,13 @@ class ResultShapeContractUnitTest : TestCase() {
                     problems = listOf(problemInfo),
                     intentions = listOf(intentionInfo),
                     problemCount = 1,
+                    problemsTruncated = true,
                     intentionCount = 1,
                     analysisFresh = true,
                     analysisTimedOut = true,
                     analysisMessage = "analysis finished",
                     analysisMode = "closed_batch",
+                    fileAnalyses = listOf(fileDiagnosticsAnalysis),
                     buildErrors = listOf(buildMessage),
                     buildErrorCount = 1,
                     buildWarningCount = 2,
@@ -645,6 +657,7 @@ class ResultShapeContractUnitTest : TestCase() {
                     testResultsTruncated = true
                 )
             ),
+            struct(FileDiagnosticsAnalysis.serializer(), fileDiagnosticsAnalysis),
             struct(ProblemInfo.serializer(), problemInfo),
             struct(IntentionInfo.serializer(), intentionInfo),
             struct(TestResultInfo.serializer(), testResultInfo),

@@ -366,15 +366,15 @@ schema:
 description:
   Get code diagnostics from multiple sources: file analysis (errors, warnings, intentions), build output (compiler errors/warnings from last build), and test results (from open test run tabs).
   
-  Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. The analysisMode field reports which provider produced the file problems: "open_daemon" (file open in an editor) or "closed_batch" (public batch analysis); null when no analysis ran.
+  Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. Single-file calls report legacy top-level analysis metadata. Multi-file calls return one aggregate problems list plus fileAnalyses entries with mode, freshness, timeout, message, returned problemCount, and problemsTruncated metadata for each file. Code problems share a 100-item response cap; top-level problemsTruncated reports omitted problems. Fresh analysis does not imply complete output: re-query truncated files individually, narrowing startLine/endLine if needed.
   
-  At least one source must be active: provide 'file' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine all three.
+  At least one source must be active: provide exactly one of 'file' or 'files' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine file analysis with build and test results. A multi-file call accepts at most 100 supplied paths, all sharing one analysis timeout budget; lexical aliases are analyzed only once.
   
   File analysis uses fresh daemon highlights for files that are already open in an editor. Closed files use public batch analysis, so weak warnings and quick-fix intentions may be less complete unless the file is open. The analyzed file is re-read from disk first, so results reflect edits made outside the IDE without calling ide_sync_files. For diagnostics across many files or the whole project with per-file coverage metadata, use ide_project_diagnostics.
   
-  Parameters: file (optional, enables code analysis), line + column (optional, for intentions, requires file), startLine/endLine (optional, requires file), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
+  Parameters: file or files (mutually exclusive, enable code analysis), line + column (optional, for intentions, single file only), startLine/endLine (optional, single file only), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
   
-  Example: {"file": "src/MyClass.java"} or {"includeBuildErrors": true, "severity": "errors"} or {"file": "src/MyClass.java", "includeBuildErrors": true, "includeTestResults": true}
+  Example: {"file": "src/MyClass.java"} or {"files": ["src/A.java", "src/B.java"]} or {"includeBuildErrors": true, "severity": "errors"}
 schema:
   {
     "properties":
@@ -393,6 +393,18 @@ schema:
       {
         "description": "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). Optional — enables per-file code analysis.",
         "type": "string"
+      },
+      "files":
+      {
+        "description": "Project-relative file paths to analyze under one shared timeout budget (max 100). Mutually exclusive with 'file'.",
+        "items":
+        {
+          "type": "string"
+        },
+        "maxItems": 100,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": true
       },
       "includeBuildErrors":
       {

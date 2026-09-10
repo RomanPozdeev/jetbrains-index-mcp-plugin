@@ -108,7 +108,39 @@ class DiagnosticsAnalysisService(private val project: Project) {
         severity: String,
         startLine: Int?,
         endLine: Int?,
-        maxProblems: Int
+        maxProblems: Int,
+        timeoutMs: Long? = null
+    ): FileAnalysisResult {
+        val effectiveTimeoutMs = (timeoutMs ?: configuredAnalysisTimeoutMs()).coerceAtLeast(1L)
+        return withTimeoutOrNull(effectiveTimeoutMs) {
+            analyzeFileWithinBudget(
+                virtualFile = virtualFile,
+                filePath = filePath,
+                severity = severity,
+                startLine = startLine,
+                endLine = endLine,
+                maxProblems = maxProblems,
+                timeoutMs = effectiveTimeoutMs
+            )
+        } ?: timeoutResult(effectiveTimeoutMs)
+    }
+
+    /**
+     * The complete analysis budget, including disk refresh, PSI setup, and waiting for the
+     * application-wide main-pass lock. Callers analyzing several files can pass the remaining
+     * part of one shared budget through [analyzeFile]'s `timeoutMs` parameter.
+     */
+    internal fun configuredAnalysisTimeoutMs(): Long =
+        (analysisTimeoutMsOverride ?: DEFAULT_ANALYSIS_TIMEOUT_MS).coerceAtLeast(1L)
+
+    private suspend fun analyzeFileWithinBudget(
+        virtualFile: VirtualFile,
+        filePath: String,
+        severity: String,
+        startLine: Int?,
+        endLine: Int?,
+        maxProblems: Int,
+        timeoutMs: Long
     ): FileAnalysisResult {
         refreshFromDisk(virtualFile)
 
@@ -154,7 +186,6 @@ class DiagnosticsAnalysisService(private val project: Project) {
             )
         }
 
-        val timeoutMs = analysisTimeoutMsOverride ?: DEFAULT_ANALYSIS_TIMEOUT_MS
         val minSeverity = minimumSeverityFor(severity)
 
         return DiagnosticsAnalysisCoordinator.getInstance().withMainPassLock {

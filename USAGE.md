@@ -19,7 +19,7 @@ These tools work in every supported JetBrains IDE:
 | `ide_find_file` | Search files by name | Enabled |
 | `ide_find_symbol` | Search code symbols by name *(disabled by default)* | Disabled |
 | `ide_search_text` | Text search using IntelliJ Find in Files (substring + regex) | Enabled |
-| `ide_diagnostics` | Analyze file problems with fresh IDE diagnostics, plus optional build/test results | Enabled |
+| `ide_diagnostics` | Analyze one file or a small multi-file batch under one shared budget, plus optional build/test results | Enabled |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata; long analyses return an `analysisId` to poll | Disabled |
 | `ide_index_status` | Check indexing status | Enabled |
 | `ide_sync_files` | Force sync VFS/PSI cache | Enabled |
@@ -709,7 +709,11 @@ Analyzes code diagnostics from three sources:
 - optional build output from the last build,
 - optional test results from open test run tabs.
 
-File problems are collected through explicit daemon analysis, so they do not depend on the target project window being active. Intentions/quick fixes are best-effort and require the file to already be open in an editor.
+File problems are collected through explicit daemon analysis, so they do not depend on the target
+project window being active. Analyze either one `file` or a non-empty `files` list. Multi-file calls
+share one configured analysis timeout budget for the whole request, rather than restarting the
+budget for every file. Intentions/quick fixes are best-effort, require the file to already be open
+in an editor, and are available only in single-file mode.
 
 **Use when:**
 - Finding code issues in a file
@@ -723,11 +727,12 @@ File problems are collected through explicit daemon analysis, so they do not dep
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | No | Path to the file relative to project root. Enables per-file code analysis. At least one of `file`, `includeBuildErrors`, or `includeTestResults` must be provided |
-| `line` | integer | No | 1-based line number for intention lookup (default: 1) |
-| `column` | integer | No | 1-based column number for intention lookup (default: 1) |
-| `startLine` | integer | No | Filter problems to start from this line |
-| `endLine` | integer | No | Filter problems to end at this line |
+| `file` | string | No | One project-relative file to analyze. Mutually exclusive with `files`. At least one of `file`, `files`, `includeBuildErrors`, or `includeTestResults` must be provided |
+| `files` | string[] | No | Up to 100 non-empty, unique project-relative file paths analyzed under one shared timeout budget. Whitespace in filenames is preserved. Mutually exclusive with `file` |
+| `line` | integer | No | 1-based line number for intention lookup (default: 1). Single `file` only |
+| `column` | integer | No | 1-based column number for intention lookup (default: 1). Single `file` only |
+| `startLine` | integer | No | Filter problems to start from this line. Single `file` only |
+| `endLine` | integer | No | Filter problems to end at this line. Single `file` only |
 | `includeBuildErrors` | boolean | No | Include errors/warnings from the last build (default: `false`) |
 | `includeTestResults` | boolean | No | Include test results from open test run tabs (default: `false`) |
 | `severity` | string | No | Filter diagnostics by `all`, `errors`, or `warnings` (default: `all`) |
@@ -764,6 +769,24 @@ File problems are collected through explicit daemon analysis, so they do not dep
 }
 ```
 
+**Example Request (multiple files):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_diagnostics",
+    "arguments": {
+      "files": [
+        "src/main/java/com/example/UserService.java",
+        "src/main/java/com/example/UserController.java"
+      ],
+      "severity": "errors"
+    }
+  }
+}
+```
+
 **Example Response:**
 
 ```json
@@ -793,8 +816,11 @@ File problems are collected through explicit daemon analysis, so they do not dep
 - `analysisTimedOut = true` means the file analysis budget was exceeded; build/test sections may still be returned.
 - `analysisMessage` explains degraded cases such as timeouts or missing live editor context for intentions.
 - `analysisMode` reports which analysis path produced the file problems: `open_daemon` (file open in an editor, fresh daemon highlights) or `closed_batch` (public batch analysis); `null` when no analysis ran.
+- The four legacy top-level analysis fields above apply to single-file calls. Multi-file calls return one aggregate `problems` list and `fileAnalyses: [{file, mode, fresh, timedOut, message, problemCount, problemsTruncated}]`, including an entry for a missing, deleted, failed, or unprocessed requested file.
+- Code problems share a 100-item response cap. Top-level `problemsTruncated` reports known omissions (absent without code analysis); each file's flag identifies affected paths and its `problemCount` counts returned problems, not all detected problems. A file can be fresh with zero returned problems and `problemsTruncated: true`. Re-query such a path using `file`, narrowing `startLine`/`endLine` if needed. A false flag only means no collected problems were omitted by the cap; check freshness/timeouts separately.
+- The multi-file timeout is shared. Once it is exhausted, remaining files are reported with `fresh: false`, `timedOut: true`, and an explanatory `message`; they do not each receive another full timeout.
 - The analyzed file is refreshed from disk and committed to PSI before analysis, so problems describe the file as it is on disk. There is no need to call `ide_sync_files` first after editing a file with an external tool.
-- `line` and `column` affect intention lookup only; file problems are collected for the whole file, then filtered by `startLine` / `endLine` if provided.
+- `line` and `column` affect intention lookup only; file problems are collected for the whole file, then filtered by `startLine` / `endLine` if provided. All four location fields are rejected with `files`.
 
 **Severity Values:**
 - `ERROR` - Compilation error
