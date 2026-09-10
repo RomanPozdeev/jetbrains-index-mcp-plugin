@@ -6,6 +6,10 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.McpPlatformTestCa
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.DefinitionResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.FindDefinitionTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.SymbolInfoTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ChangeSignatureTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.RefactoringPreviewResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.RenameSymbolTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.SafeDeleteTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PluginDetectors
 import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
@@ -78,7 +82,7 @@ class UnifiedTargetToolBehaviorTest : McpPlatformTestCase() {
         assertEquals("work", json.decodeFromString<DefinitionResult>(toolText(result)).symbolName)
     }
 
-    fun testNestedQualifiedNameWorksForSemanticLookup() = runBlocking {
+    fun testNestedQualifiedNameWorksForSemanticLookupAndAllPreviewRefactorings() = runBlocking {
         Assume.assumeTrue("Java plugin required for this fixture", PluginDetectors.java.isAvailable)
         registerSourceRoot("qualified-target-src")
         val path = writeProjectFile("qualified-target-src/unifiedtarget/Service.java", javaSource())
@@ -90,7 +94,28 @@ class UnifiedTargetToolBehaviorTest : McpPlatformTestCase() {
         assertToolSucceeded("nested target.qualifiedName should resolve in semantic tools", info)
         assertTrue(toolText(info).contains("work"))
 
-        assertTrue("Lookup changed source bytes", before.contentEquals(Files.readAllBytes(path)))
+        val rename = RenameSymbolTool().execute(project, buildJsonObject {
+            qualifiedMethodTarget()
+            put("newName", "compute")
+            put("dryRun", true)
+        })
+        assertApplicablePreview("rename", rename)
+
+        val safeDelete = SafeDeleteTool().execute(project, buildJsonObject {
+            qualifiedMethodTarget()
+            put("force", true)
+            put("dryRun", true)
+        })
+        assertApplicablePreview("safe delete", safeDelete)
+
+        val changeSignature = ChangeSignatureTool().execute(project, buildJsonObject {
+            qualifiedMethodTarget()
+            put("newName", "compute")
+            put("dryRun", true)
+        })
+        assertApplicablePreview("change signature", changeSignature)
+
+        assertTrue("nested-target previews changed the source file", before.contentEquals(Files.readAllBytes(path)))
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.qualifiedMethodTarget() {
@@ -98,6 +123,13 @@ class UnifiedTargetToolBehaviorTest : McpPlatformTestCase() {
             put("qualifiedName", "unifiedtarget.Service#work(int)")
             put("language", "Java")
         }
+    }
+
+    private fun assertApplicablePreview(label: String, result: io.modelcontextprotocol.kotlin.sdk.types.CallToolResult) {
+        assertToolSucceeded("$label preview should resolve nested target.qualifiedName", result)
+        val preview = json.decodeFromString<RefactoringPreviewResult>(toolText(result))
+        assertTrue("$label preview should be applicable: ${preview.warnings}", preview.canApply)
+        assertEquals("work", preview.target.name)
     }
 
     private fun javaSource() = """

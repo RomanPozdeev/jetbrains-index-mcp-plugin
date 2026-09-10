@@ -225,3 +225,10 @@ It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply
 eligibility, including files with no declarations and incomplete usage discovery; warnings describe
 these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
 ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.
+
+### Change-signature preview
+
+`ide_change_signature` accepts `symbolId`, a nested `target`, or the existing file position.
+`dryRun=true` uses public platform usage and conflict discovery without running the processor.
+The shared preview reports affected files, conflicts, read-only scope, and cases requiring
+an interactive overrider/default-value decision. Apply returns updated symbol metadata.

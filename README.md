@@ -299,7 +299,7 @@ These tools work in all supported JetBrains IDEs.
 | `ide_structural_search_replace` | Pattern-based code search and transformation using IntelliJ's Structural Search and Replace engine, optionally restricted to path globs via `paths` (Java, Kotlin) *(disabled by default)* |
 | `ide_create_file` | Create a new source file with content, immediately indexed by IntelliJ — use instead of Write for `.java`, `.kt`, `.ts`, `.tsx`, `.py` files *(disabled by default)* |
 | `ide_replace_text_in_file` | Find and replace text in a file using IntelliJ's Document API — changes immediately visible to index and PSI without `ide_sync_files` *(disabled by default)* |
-| `ide_change_signature` | Change method signature with automatic caller updates (Java only) *(disabled by default)* |
+| `ide_change_signature` | Change method signature with automatic caller updates (Java, Kotlin JVM functions) *(disabled by default)* |
 | `ide_edit_member` | Replace an entire member declaration (signature + body) with new content (Java, Kotlin) *(disabled by default)* |
 | `ide_insert_member` | Insert a new member at a structural position in a class or file (Java, Kotlin) *(disabled by default)* |
 | `ide_replace_member` | Replace a method body or field initializer only, preserving the signature (Java, Kotlin) *(disabled by default)* |
@@ -625,3 +625,10 @@ It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply
 eligibility, including files with no declarations and incomplete usage discovery; warnings describe
 these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
 ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.
+
+### Change-signature preview
+
+`ide_change_signature` accepts `symbolId`, a nested `target`, or the existing file position.
+`dryRun=true` uses public platform usage and conflict discovery without running the processor.
+The shared preview reports affected files, conflicts, read-only scope, and cases requiring
+an interactive overrider/default-value decision. Apply returns updated symbol metadata.

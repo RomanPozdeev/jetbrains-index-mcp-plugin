@@ -478,22 +478,33 @@ Pattern-based code search and transformation using IntelliJ's Structural Search 
 **Languages**: Java, Kotlin.
 
 ### ide_change_signature (disabled by default)
+
 Change method signature (name, return type, visibility, parameters) with automatic caller updates.
+
+**Languages:** Java methods and Kotlin JVM functions. Select Kotlin functions by source position or
+`symbolId`; override changes start at the base declaration and update implementations and callers.
+Preview reports the base target without rebinding the original override's handle. After apply,
+`updatedSymbol` preserves that handle's declaration when it remains available.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | yes | Relative file path containing the method |
-| `line` | integer | yes | 1-based line of the method |
-| `column` | integer | yes | 1-based column on the method name |
+| `target` | object | conditional | Structured method selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | conditional | Exact method handle. Mutually exclusive with coordinates. |
+| `file` | string | conditional | Relative file path containing the method. Required without `symbolId`. |
+| `line` | integer | conditional | 1-based line of the method. Required without `symbolId`. |
+| `column` | integer | conditional | 1-based column on the method name. Required without `symbolId`. |
+| `language` | string | conditional | Legacy qualified-name selector language; requires `symbol`. |
+| `symbol` | string | conditional | Legacy qualified method name; requires `language`. |
 | `newName` | string | no | New method name (unchanged if omitted) |
 | `newReturnType` | string | no | New return type (unchanged if omitted) |
 | `newVisibility` | string | no | `public`, `protected`, `private`, or `package-local` (unchanged if omitted) |
 | `newParameters` | array | no | Array of `{ oldIndex, name, type, defaultValue }`. Use `oldIndex: -1` for new params |
-| `generateDelegate` | boolean | no | Generate delegate with old signature (default false) |
+| `generateDelegate` | boolean | no | Generate delegate with old signature (default false); new required parameters need explicit non-blank defaults even with no existing callers |
+| `dryRun` | boolean | no | Resolve/validate and discover callers/conflicts without writing or saving files. Default false |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ success, file, message, affectedFiles, changesCount }`
-**Language**: Java only.
+**Returns**: `{ success, file, message, affectedFiles, changesCount, updatedSymbol? }`
+**Returns with `dryRun: true`**: common preview shape; `plannedChange` contains `{operation: "changeSignature", before: {...}, requested: {...}}`.
 
 ### ide_create_file (disabled by default)
 Create a new source file with content, immediately indexed by IntelliJ. The file is created through IntelliJ's VFS, so it is instantly available for `ide_find_references`, `ide_refactor_rename`, `ide_edit_member`, and all other IDE tools without needing `ide_sync_files`. Use this instead of the Write tool for creating `.java`, `.kt`, `.ts`, `.tsx`, `.py` files. The file must not already exist.

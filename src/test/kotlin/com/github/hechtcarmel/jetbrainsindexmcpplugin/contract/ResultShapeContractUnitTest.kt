@@ -1111,7 +1111,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     file = "src/main/java/com/example/Service.java",
                     message = "Signature changed",
                     affectedFiles = listOf("src/main/java/com/example/Caller.java"),
-                    changesCount = 2
+                    changesCount = 2,
+                    updatedSymbol = updatedSymbol
                 )
             ),
             struct(
