@@ -1837,34 +1837,17 @@ schema:
 
 ## ide_refactor_rename
 description:
-  Rename a symbol or file and update all references across the project. Use instead of find-and-replace for safe, semantic renaming that handles all usages correctly. Supports undo (Ctrl+Z).
+  Rename a symbol or file and update references semantically across the project. Supports undo.
+  Supply newName and a symbol target (symbolId, position, or language+symbol), or file for file rename.
+  targetType="file" ignores placeholder coordinates and supports binary/Android resource files, updating resource references. Include the extension in newName.
+  Without targetType, omitted/null line+column selects file rename; both coordinates select a symbol.
   
-  Two modes:
-  - **Symbol rename** (`targetType="symbol"`, file + line + column + newName): Rename a symbol at a specific position. `line` and `column` are 1-based and must be provided.
-  - **File rename** (`targetType="file"`, file + newName): Rename the file itself. Any placeholder `line`/`column` values are ignored for mode selection. Works for all file types including binary files (images, etc.). Especially useful for Android resource files (.webp, .png, .xml in res/) where it updates all resource references across the project.
+  overrideStrategy: rename_base (default) includes base and overrides; rename_only_current limits to this declaration; ask opens an IDE chooser.
+  relatedRenamingStrategy: all (default), none, accessors_and_tests, or ask. Related elements can include accessors, parameters/fields, tests, variables and inheritors.
+  dryRun=true returns the planned changes, affected files, usages, conflicts and canApply without editing. Interactive ask strategies cannot produce an applicable headless preview.
+  Apply returns affected files and change count.
   
-  Backward compatibility: if `targetType` is omitted, null/null line+column still means file rename; provided line+column still means symbol rename.
-  
-  Automatically renames related elements: getters/setters, overriding methods, constructor parameters ↔ fields, test classes.
-  
-  When renaming a method that overrides a base method, the `overrideStrategy` parameter controls behavior:
-  - "rename_base" (default): Automatically renames the base method and all overrides. No dialog shown.
-  - "rename_only_current": Renames only the current method, leaving the base and other overrides unchanged.
-  - "ask": Shows the IDE's built-in dialog to let the user choose interactively.
-  
-  The `relatedRenamingStrategy` parameter controls automatic renaming of related symbols (e.g., same-named properties on unrelated classes, getters/setters, test classes, variables):
-  - "all" (default): Automatically rename all related symbols. Current behavior.
-  - "none": Rename only the targeted symbol. Skip all automatic related renames.
-  - "accessors_and_tests": Only rename getters/setters and test classes/methods. Skip variables, inheritors, overloads, and parameters on unrelated classes.
-  - "ask": Show the IDE dialog for each related rename for interactive choice.
-  
-  Returns: affected files list and change count. Modifies source files.
-  
-  Parameters: file + newName (required). targetType is optional; line + column are only needed for symbol rename. overrideStrategy + relatedRenamingStrategy (optional).
-  
-  Examples:
-  - Symbol rename: {"file": "src/UserService.java", "targetType": "symbol", "line": 15, "column": 18, "newName": "CustomerService"}
-  - File rename: {"file": "res/mipmap-hdpi/ic_launcher.webp", "targetType": "file", "newName": "ic_app_icon.webp"}
+  Example: {"file":"src/UserService.java","line":15,"column":18,"newName":"CustomerService"}
 schema:
   {
     "properties":
@@ -1874,9 +1857,26 @@ schema:
         "description": "1-based column number. Required for symbol rename; omit for file rename unless `targetType=file`.",
         "type": "integer"
       },
+      "dryRun":
+      {
+        "description": "Resolve and validate the target, then discover usages/conflicts without modifying files. Default: false.",
+        "type": "boolean"
+      },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required for file rename or position-based symbol rename; omit when symbolId is used.",
+        "type": "string"
+      },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
         "type": "string"
       },
       "line":
@@ -1917,6 +1917,67 @@ schema:
         ],
         "type": "string"
       },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Excludes top-level symbolId/file/line/column/language/symbol/className.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Path to the file relative to project root",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "targetType":
       {
         "description": "What to rename: 'symbol' (requires 1-based line+column) or 'file' (renames the file itself and ignores placeholder line/column values). If omitted, legacy behavior applies.",
@@ -1930,7 +1991,6 @@ schema:
     },
     "required":
     [
-      "file",
       "newName"
     ],
     "type": "object"

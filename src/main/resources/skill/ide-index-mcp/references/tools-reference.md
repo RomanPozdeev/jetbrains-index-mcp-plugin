@@ -366,22 +366,29 @@ Each call blocks at most `waitSeconds` (default 45) so the MCP client's request 
 ## Refactoring Tools
 
 ### ide_refactor_rename
+
 Rename a symbol or file and update ALL references (semantic rename, not find-replace). Works across ALL languages.
 
-**Target:** `file` + `targetType="file"` for file rename, or `file` + `targetType="symbol"` + `line` + `column` for symbol rename. Without `targetType`, legacy `null/null => file` and `line`+`column => symbol` behavior remains.
+**Target:** `file` + `targetType="file"` for file rename; for symbol rename use `symbolId`, or `file` + `targetType="symbol"` + `line` + `column`. Without `targetType`, legacy `null/null => file` and `line`+`column => symbol` behavior remains.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | conditional | Structured symbol selector containing exactly one of `symbolId`, `position: {file, line, column}`, or `qualifiedName` + `language`. Mutually exclusive with legacy top-level selectors. |
+| `symbolId` | string | conditional | Exact symbol handle. Mutually exclusive with `file`/coordinates. |
 | `file` | string | conditional | Relative file path. Required for position-based lookup. |
+| `language` | string | conditional | Legacy qualified-name selector language; requires `symbol`. |
+| `symbol` | string | conditional | Legacy qualified symbol name; requires `language`. |
 | `targetType` | string | no | `symbol` or `file`. When `file`, placeholder `line`/`column` values are ignored. |
 | `line` | integer | no | 1-based line for symbol rename. |
 | `column` | integer | no | 1-based column for symbol rename. |
 | `newName` | string | yes | New name for the symbol |
 | `overrideStrategy` | enum | no | `rename_base` (default), `rename_only_current`, `ask` |
 | `relatedRenamingStrategy` | enum | no | Controls automatic renaming of related symbols (same-named properties, getters/setters, test classes, variables): `all` (default) renames all related symbols, `none` renames only the targeted symbol, `accessors_and_tests` renames only getters/setters and test classes/methods, `ask` shows the IDE dialog for each related rename |
+| `dryRun` | boolean | no | Resolve/validate and discover usages/conflicts without writing or saving files. Default false |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ success, affectedFiles: [paths], changesCount, message }`
+**Returns**: `{ success, affectedFiles: [paths], changesCount, message, updatedSymbol? }`
+**Returns with `dryRun: true`**: common preview shape; rename `plannedChange` contains `{operation: "rename", targetType, from, to, overrideStrategy, relatedRenamingStrategy}`. Constructors resolve to the containing class for preview and apply. Destination conflicts include implicit Java file renames and existing directories.
 **Auto-renames**: getters/setters, overriding methods, constructor params <-> fields, test classes.
 **Supports IDE undo** (Ctrl+Z).
 

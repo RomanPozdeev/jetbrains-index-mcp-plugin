@@ -16,6 +16,8 @@ plugins {
 group = providers.gradleProperty("pluginGroup").get()
 version = providers.gradleProperty("pluginVersion").get()
 
+val kotlinPluginTests = providers.gradleProperty("kotlinPluginTests").map(String::toBoolean).orElse(false)
+
 // Set the JVM language level used to build the project.
 kotlin {
     jvmToolchain(21)
@@ -122,6 +124,25 @@ dependencies {
         // list is empty and the tool can only ever return "No test frameworks are registered" —
         // i.e. the tool is untestable. Test-scoped so production dependencies are unchanged.
         testBundledPlugin("JUnit")
+        if (kotlinPluginTests.get()) {
+            testBundledPlugin("org.jetbrains.kotlin")
+        }
+    }
+}
+
+if (kotlinPluginTests.get()) {
+    kotlin.sourceSets.named("test") {
+        kotlin.srcDir("src/kotlinPluginTest/kotlin")
+    }
+    // Fixtures use reflection; the bundled plugin's newer metadata is not needed for compilation.
+    tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileTestKotlin") {
+        libraries.setFrom(files(sourceSets.main.get().output, configurations.testCompileClasspath).filter {
+            !it.invariantSeparatorsPath.contains("/plugins/Kotlin/")
+        })
+    }
+    // Match the IDE's stdlib so optional plugin code sees the platform's Kotlin APIs.
+    configurations.testRuntimeClasspath {
+        exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
     }
 }
 
