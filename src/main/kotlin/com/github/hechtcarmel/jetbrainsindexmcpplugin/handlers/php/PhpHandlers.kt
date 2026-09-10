@@ -17,6 +17,7 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.searches.DefinitionsScopedSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.Processor
@@ -76,6 +77,7 @@ object PhpHandlers {
         } catch (e: ClassNotFoundException) {
             LOG.warn("PHP PSI classes not found, skipping registration: ${e.message}")
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Failed to register PHP handlers: ${e.message}")
         }
     }
@@ -187,6 +189,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val getInstanceMethod = phpIndexCls.getMethod("getInstance", Project::class.java)
             getInstanceMethod.invoke(null, project)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error getting PhpIndex instance: ${e.message}")
             null
         }
@@ -209,6 +212,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             @Suppress("UNCHECKED_CAST")
             (result as? Collection<*>)?.filterIsInstance<PsiElement>() ?: emptyList()
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error getting subclasses for $fqn: ${e.message}")
             emptyList()
         }
@@ -265,7 +269,8 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
     protected fun isEnum(phpClass: PsiElement): Boolean {
         return try {
             phpClass.javaClass.getMethod("isEnum").invoke(phpClass) as? Boolean ?: false
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             false
         }
     }
@@ -315,6 +320,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = element.javaClass.getMethod("getName")
             method.invoke(element) as? String
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -327,6 +333,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = element.javaClass.getMethod("getFQN")
             method.invoke(element) as? String
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             // Fallback to just the name
             getName(element)
         }
@@ -340,6 +347,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = phpClass.javaClass.getMethod("getSuperClass")
             method.invoke(phpClass) as? PsiElement
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -352,6 +360,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = phpClass.javaClass.getMethod("getImplementedInterfaces")
             method.invoke(phpClass) as? Array<*>
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -364,6 +373,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = phpClass.javaClass.getMethod("getTraits")
             method.invoke(phpClass) as? Array<*>
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -376,6 +386,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = phpClass.javaClass.getMethod("isInterface")
             method.invoke(phpClass) as? Boolean ?: false
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             false
         }
     }
@@ -388,6 +399,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = phpClass.javaClass.getMethod("isTrait")
             method.invoke(phpClass) as? Boolean ?: false
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             false
         }
     }
@@ -400,6 +412,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val method = phpClass.javaClass.getMethod("isAbstract")
             method.invoke(phpClass) as? Boolean ?: false
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             false
         }
     }
@@ -412,6 +425,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             val getContainingClassMethod = method.javaClass.getMethod("getContainingClass")
             getContainingClassMethod.invoke(method) as? PsiElement
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -526,6 +540,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             } catch (_: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 LOG.debug("Error resolving PHP method $methodName using findMethodByName: ${e.message}")
                 null
             }
@@ -558,6 +573,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             } catch (_: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 LOG.debug("Error resolving PHP method $methodName using $collectionMethodName: ${e.message}")
                 null
             }
@@ -589,6 +605,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
                 LOG.debug("PhpIndex.$methodName(String) is not available")
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 LOG.debug("Error resolving PHP type by FQN $fqn using $methodName: ${e.message}")
                 null
             }
@@ -633,6 +650,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             } catch (_: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 LOG.debug("Error resolving PHP enum case $caseName using $methodName: ${e.message}")
                 null
             }
@@ -665,6 +683,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             } catch (_: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 LOG.debug("Error resolving PHP field $fieldName using findFieldByName: ${e.message}")
                 null
             }
@@ -691,6 +710,7 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
             } catch (_: NoSuchMethodException) {
                 null
             } catch (e: Exception) {
+                e.rethrowIfControlFlow()
                 LOG.debug("Error resolving PHP field $fieldName using $methodName: ${e.message}")
                 null
             }
@@ -707,7 +727,8 @@ abstract class BasePhpHandler<T> : LanguageHandler<T> {
         return try {
             val method = field.javaClass.getMethod("isConstant")
             method.invoke(field) as? Boolean ?: false
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             false
         }
     }
@@ -1217,14 +1238,35 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
         element: PsiElement,
         project: Project,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        directOnly: Boolean,
+        direction: TypeHierarchyDirection?,
+        page: HierarchyPageRequest?
     ): TypeHierarchyData? {
         val phpClass = findContainingPhpClass(element) ?: return null
         LOG.debug("Getting type hierarchy for PHP class: ${getName(phpClass)}")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
-        val supertypes = getSupertypes(project, phpClass, searchScope = searchScope)
-        val subtypes = getSubtypes(project, phpClass, searchScope)
+        val collectionLimit = page?.collectionLimit ?: 100
+        val rawSupertypes = if (direction != TypeHierarchyDirection.SUBTYPE) {
+            getSupertypes(project, phpClass, searchScope = searchScope, directOnly = directOnly).take(page?.collectionLimit ?: Int.MAX_VALUE)
+        } else emptyList()
+        val rawSubtypes = if (direction != TypeHierarchyDirection.SUPERTYPE) {
+            getSubtypes(
+                project,
+                phpClass,
+                searchScope,
+                directOnly,
+                collectionLimit,
+                useBoundedSearch = page != null
+            )
+        } else emptyList()
+        val (supertypes, superNext) = if (direction == TypeHierarchyDirection.SUPERTYPE) {
+            rawSupertypes.applyHierarchyPage(page)
+        } else rawSupertypes to null
+        val (subtypes, subtypeNext) = if (direction == TypeHierarchyDirection.SUBTYPE) {
+            rawSubtypes.applyHierarchyPage(page)
+        } else rawSubtypes to null
 
         LOG.debug("Found ${supertypes.size} supertypes and ${subtypes.size} subtypes")
 
@@ -1235,10 +1277,12 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
                 file = phpClass.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                 line = getLineNumber(project, phpClass),
                 kind = determineClassKind(phpClass),
-                language = "PHP"
+                language = "PHP",
+                pointerTarget = phpClass
             ),
             supertypes = supertypes,
-            subtypes = subtypes
+            subtypes = subtypes,
+            nextOffset = superNext ?: subtypeNext
         )
     }
 
@@ -1247,7 +1291,8 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
         phpClass: PsiElement,
         visited: MutableSet<String> = mutableSetOf(),
         depth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false
     ): List<TypeElementData> {
         if (depth > MAX_HIERARCHY_DEPTH) return emptyList()
 
@@ -1263,7 +1308,8 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
             if (superClass != null && shouldIncludeNavigationElement(searchScope, superClass)) {
                 val superName = getFQN(superClass) ?: getName(superClass)
                 if (superName != null && superName !in visited) {
-                    val superSupertypes = getSupertypes(project, superClass, visited, depth + 1, searchScope)
+                    val superSupertypes = if (directOnly) emptyList() else
+                        getSupertypes(project, superClass, visited, depth + 1, searchScope, directOnly = false)
                     supertypes.add(TypeElementData(
                         name = superName,
                         qualifiedName = getFQN(superClass),
@@ -1271,7 +1317,8 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
                         line = getLineNumber(project, superClass),
                         kind = determineClassKind(superClass),
                         language = "PHP",
-                        supertypes = superSupertypes.takeIf { it.isNotEmpty() }
+                        supertypes = superSupertypes.takeIf { it.isNotEmpty() },
+                        pointerTarget = superClass
                     ))
                 }
             }
@@ -1285,7 +1332,8 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
                     ifaceName !in visited &&
                     shouldIncludeNavigationElement(searchScope, iface)
                 ) {
-                    val ifaceSupertypes = getSupertypes(project, iface, visited, depth + 1, searchScope)
+                    val ifaceSupertypes = if (directOnly) emptyList() else
+                        getSupertypes(project, iface, visited, depth + 1, searchScope, directOnly = false)
                     supertypes.add(TypeElementData(
                         name = ifaceName,
                         qualifiedName = getFQN(iface),
@@ -1293,7 +1341,8 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
                         line = getLineNumber(project, iface),
                         kind = "INTERFACE",
                         language = "PHP",
-                        supertypes = ifaceSupertypes.takeIf { it.isNotEmpty() }
+                        supertypes = ifaceSupertypes.takeIf { it.isNotEmpty() },
+                        pointerTarget = iface
                     ))
                 }
             }
@@ -1313,11 +1362,13 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
                         file = trait.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                         line = getLineNumber(project, trait),
                         kind = "TRAIT",
-                        language = "PHP"
+                        language = "PHP",
+                        pointerTarget = trait
                     ))
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error getting supertypes: ${e.message}")
         }
 
@@ -1327,32 +1378,72 @@ class PhpTypeHierarchyHandler : BasePhpHandler<TypeHierarchyData>(), TypeHierarc
     private fun getSubtypes(
         project: Project,
         phpClass: PsiElement,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        directOnly: Boolean = false,
+        maxResults: Int = 100,
+        useBoundedSearch: Boolean = false
     ): List<TypeElementData> {
+        if (maxResults <= 0) return emptyList()
+
         return try {
             val fqn = getFQN(phpClass) ?: return emptyList()
             val results = mutableListOf<TypeElementData>()
 
-            // Use PhpIndex.getAllSubclasses() - the correct API for finding PHP subclasses
-            val subclasses = getAllSubclasses(project, fqn)
+            fun isAccepted(subclass: PsiElement): Boolean {
+                if (
+                    subclass === phpClass ||
+                    !isPhpClass(subclass) ||
+                    !shouldIncludeNavigationElement(searchScope, subclass)
+                ) {
+                    return false
+                }
+                if (!directOnly) return true
 
-            subclasses
-                .filter { shouldIncludeNavigationElement(searchScope, it) }
-                .take(100)
-                .forEach { subclass ->
+                return isVisibleSubtypeOf(subclass, phpClass, searchScope) { parent ->
+                    buildList {
+                        getSuperClass(parent)?.let(::add)
+                        getImplementedInterfaces(parent)?.filterIsInstance<PsiElement>()?.let(::addAll)
+                    }
+                }
+            }
+
+            fun addSubtype(subclass: PsiElement) {
                 results.add(TypeElementData(
                     name = getFQN(subclass) ?: getName(subclass) ?: "unknown",
                     qualifiedName = getFQN(subclass),
                     file = subclass.containingFile?.virtualFile?.let { getRelativePath(project, it) },
                     line = getLineNumber(project, subclass),
                     kind = determineClassKind(subclass),
-                    language = "PHP"
+                    language = "PHP",
+                    pointerTarget = subclass
                 ))
             }
 
-            LOG.debug("Found ${results.size} subtypes for $fqn using PhpIndex")
+            if (useBoundedSearch) {
+                // Request deep descendants so excluded intermediate classes do not hide an
+                // included leaf. Query.forEach still stops at the accepted look-ahead item.
+                DefinitionsScopedSearch.search(phpClass, searchScope, true).forEach(Processor { definition ->
+                    if (isAccepted(definition)) {
+                        addSubtype(definition)
+                    }
+                    results.size < maxResults
+                })
+            } else {
+                // Preserve the established PhpIndex semantics for legacy, unpaged callers. That
+                // API returns a materialized Collection and cannot be cancelled after N matches.
+                for (subclass in getAllSubclasses(project, fqn)) {
+                    if (isAccepted(subclass)) {
+                        addSubtype(subclass)
+                        if (results.size >= maxResults) break
+                    }
+                }
+            }
+
+            val searchApi = if (useBoundedSearch) "DefinitionsScopedSearch" else "PhpIndex"
+            LOG.debug("Found ${results.size} subtypes for $fqn using $searchApi")
             results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Error getting subtypes: ${e.message}")
             emptyList()
         }
@@ -1516,24 +1607,28 @@ class PhpCallHierarchyHandler : BasePhpHandler<CallHierarchyData>(), CallHierarc
         direction: String,
         depth: Int,
         scope: BuiltInSearchScope,
-        excludeGenerated: Boolean
+        excludeGenerated: Boolean,
+        page: HierarchyPageRequest?
     ): CallHierarchyData? {
         val callable = findContainingCallable(element) ?: return null
         LOG.debug("Getting call hierarchy for ${getName(callable)}, direction=$direction, depth=$depth")
         val searchScope = createNavigationSearchScope(project, scope, excludeGenerated)
 
         val visited = mutableSetOf<String>()
-        val calls = if (direction == "callers") {
-            findCallersRecursive(project, callable, depth, visited, searchScope = searchScope)
+        val maxResults = page?.collectionLimit ?: MAX_RESULTS_PER_LEVEL
+        val rawCalls = if (direction == "callers") {
+            findCallersRecursive(project, callable, depth, visited, searchScope = searchScope, maxResults = maxResults)
         } else {
-            findCalleesRecursive(project, callable, depth, visited, searchScope = searchScope)
+            findCalleesRecursive(project, callable, depth, visited, searchScope = searchScope, maxResults = maxResults)
         }
+        val (calls, nextOffset) = rawCalls.applyHierarchyPage(page)
 
         LOG.debug("Found ${calls.size} $direction")
 
         return CallHierarchyData(
             element = createCallElement(project, callable),
-            calls = calls
+            calls = calls,
+            nextOffset = nextOffset
         )
     }
 
@@ -1599,9 +1694,11 @@ class PhpCallHierarchyHandler : BasePhpHandler<CallHierarchyData>(), CallHierarc
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
+        if (maxResults <= 0) return emptyList()
 
         val callableKey = getCallableKey(callable)
         if (callableKey in visited) return emptyList()
@@ -1614,35 +1711,60 @@ class PhpCallHierarchyHandler : BasePhpHandler<CallHierarchyData>(), CallHierarc
                 methodsToSearch.addAll(findAllSuperMethods(project, callable))
             }
 
-            val allReferences = mutableListOf<com.intellij.psi.PsiReference>()
+            val results = mutableListOf<CallElementData>()
+            val seenCallers = mutableSetOf<String>()
+            val seenResults = mutableSetOf<String>()
+            var processedReferences = 0
 
             for (methodToSearch in methodsToSearch) {
+                if (results.size >= maxResults) break
                 ReferencesSearch.search(methodToSearch, searchScope).forEach(Processor { reference ->
-                    allReferences.add(reference)
-                    allReferences.size < MAX_RESULTS_PER_LEVEL * 2
+                    processedReferences++
+                    val containingCallable = findContainingCallable(reference.element)
+                    if (
+                        containingCallable != null &&
+                        containingCallable != callable &&
+                        containingCallable !in methodsToSearch
+                    ) {
+                        val callerPath = containingCallable.containingFile?.virtualFile?.path.orEmpty()
+                        val callerIdentity = "$callerPath:${containingCallable.textOffset}:${getCallableKey(containingCallable)}"
+                        if (seenCallers.add(callerIdentity)) {
+                            val children = if (depth > 1) {
+                                findCallersRecursive(
+                                    project,
+                                    containingCallable,
+                                    depth - 1,
+                                    visited,
+                                    stackDepth + 1,
+                                    searchScope,
+                                    maxResults
+                                )
+                            } else null
+
+                            val candidates = if (shouldIncludeNavigationElement(searchScope, containingCallable)) {
+                                listOf(createCallElement(project, containingCallable, children))
+                            } else {
+                                children.orEmpty()
+                            }
+                            for (candidate in candidates) {
+                                if (results.size >= maxResults) break
+                                val resultIdentity = "${candidate.name}:${candidate.file}:${candidate.line}"
+                                if (seenResults.add(resultIdentity)) {
+                                    results.add(candidate)
+                                }
+                            }
+                        }
+                    }
+                    results.size < maxResults
                 })
             }
 
-            LOG.debug("Found ${allReferences.size} references for ${getName(callable)}")
-
-            val results = mutableListOf<CallElementData>()
-            for (reference in allReferences) {
-                if (results.size >= MAX_RESULTS_PER_LEVEL) break
-                val refElement = reference.element
-                val containingCallable = findContainingCallable(refElement)
-                if (containingCallable != null && containingCallable != callable && containingCallable !in methodsToSearch) {
-                    val children = if (depth > 1) {
-                        findCallersRecursive(project, containingCallable, depth - 1, visited, stackDepth + 1, searchScope)
-                    } else null
-                    if (shouldIncludeNavigationElement(searchScope, containingCallable)) {
-                        results.add(createCallElement(project, containingCallable, children))
-                    } else if (children != null) {
-                        results.addAll(children)
-                    }
-                }
-            }
-            results.distinctBy { it.name + it.file + it.line }.take(MAX_RESULTS_PER_LEVEL)
+            LOG.debug(
+                "Found ${results.size} callers after processing $processedReferences references for ${getName(callable)}"
+            )
+            results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Error finding callers: ${e.message}")
             emptyList()
         }
@@ -1654,9 +1776,11 @@ class PhpCallHierarchyHandler : BasePhpHandler<CallHierarchyData>(), CallHierarc
         depth: Int,
         visited: MutableSet<String>,
         stackDepth: Int = 0,
-        searchScope: GlobalSearchScope
+        searchScope: GlobalSearchScope,
+        maxResults: Int
     ): List<CallElementData> {
         if (stackDepth > MAX_STACK_DEPTH || depth <= 0) return emptyList()
+        if (maxResults <= 0) return emptyList()
 
         val callableKey = getCallableKey(callable)
         if (callableKey in visited) return emptyList()
@@ -1668,56 +1792,50 @@ class PhpCallHierarchyHandler : BasePhpHandler<CallHierarchyData>(), CallHierarc
             val methodRef = methodReferenceClass
             val functionRef = functionReferenceClass
 
-            if (methodRef != null) {
-                @Suppress("UNCHECKED_CAST")
-                val methodCalls = PsiTreeUtil.findChildrenOfType(callable, methodRef as Class<out PsiElement>)
-                methodCalls.take(MAX_RESULTS_PER_LEVEL).forEach { callExpr ->
-                    val calledMethod = resolveReference(callExpr)
-                    if (calledMethod != null && (isMethod(calledMethod) || isFunction(calledMethod))) {
-                        val children = if (depth > 1) {
-                            findCalleesRecursive(project, calledMethod, depth - 1, visited, stackDepth + 1, searchScope)
-                        } else null
-                        if (shouldIncludeNavigationElement(searchScope, calledMethod)) {
-                            val element = createCallElement(project, calledMethod, children)
-                            if (callees.none { it.name == element.name && it.file == element.file }) {
-                                callees.add(element)
-                            }
-                        } else if (children != null) {
-                            children.forEach { child ->
-                                if (callees.none { it.name == child.name && it.file == child.file }) {
-                                    callees.add(child)
-                                }
-                            }
-                        }
+            fun addResolvedCallee(called: PsiElement) {
+                val children = if (depth > 1) {
+                    findCalleesRecursive(
+                        project,
+                        called,
+                        depth - 1,
+                        visited,
+                        stackDepth + 1,
+                        searchScope,
+                        maxResults
+                    )
+                } else null
+                val candidates = if (shouldIncludeNavigationElement(searchScope, called)) {
+                    listOf(createCallElement(project, called, children))
+                } else {
+                    children.orEmpty()
+                }
+                for (candidate in candidates) {
+                    if (callees.size >= maxResults) break
+                    if (callees.none { it.name == candidate.name && it.file == candidate.file }) {
+                        callees.add(candidate)
                     }
                 }
             }
 
-            if (functionRef != null) {
-                @Suppress("UNCHECKED_CAST")
-                val functionCalls = PsiTreeUtil.findChildrenOfType(callable, functionRef as Class<out PsiElement>)
-                functionCalls.take(MAX_RESULTS_PER_LEVEL).forEach { callExpr ->
-                    val calledFunction = resolveReference(callExpr)
-                    if (calledFunction != null && isFunction(calledFunction)) {
-                        val children = if (depth > 1) {
-                            findCalleesRecursive(project, calledFunction, depth - 1, visited, stackDepth + 1, searchScope)
-                        } else null
-                        if (shouldIncludeNavigationElement(searchScope, calledFunction)) {
-                            val element = createCallElement(project, calledFunction, children)
-                            if (callees.none { it.name == element.name && it.file == element.file }) {
-                                callees.add(element)
-                            }
-                        } else if (children != null) {
-                            children.forEach { child ->
-                                if (callees.none { it.name == child.name && it.file == child.file }) {
-                                    callees.add(child)
-                                }
-                            }
+            PsiTreeUtil.processElements(callable) { candidate ->
+                when {
+                    methodRef?.isInstance(candidate) == true -> {
+                        val calledMethod = resolveReference(candidate)
+                        if (calledMethod != null && (isMethod(calledMethod) || isFunction(calledMethod))) {
+                            addResolvedCallee(calledMethod)
+                        }
+                    }
+                    functionRef?.isInstance(candidate) == true -> {
+                        val calledFunction = resolveReference(candidate)
+                        if (calledFunction != null && isFunction(calledFunction)) {
+                            addResolvedCallee(calledFunction)
                         }
                     }
                 }
+                callees.size < maxResults
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error finding callees: ${e.message}")
         }
         return callees
@@ -1728,6 +1846,7 @@ class PhpCallHierarchyHandler : BasePhpHandler<CallHierarchyData>(), CallHierarc
             val resolveMethod = reference.javaClass.getMethod("resolve")
             resolveMethod.invoke(reference) as? PsiElement
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -1757,7 +1876,8 @@ class PhpCallHierarchyHandler : BasePhpHandler<CallHierarchyData>(), CallHierarc
             line = getLineNumber(project, callable) ?: 0,
             column = getColumnNumber(project, callable) ?: 0,
             language = "PHP",
-            children = children?.takeIf { it.isNotEmpty() }
+            children = children?.takeIf { it.isNotEmpty() },
+            pointerTarget = callable
         )
     }
 }

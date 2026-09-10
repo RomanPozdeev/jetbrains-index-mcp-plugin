@@ -241,3 +241,14 @@ Cached searches keep `stale=true` after PSI edits and rebind exact smart pointer
 deleted targets and another project/session are rejected. Member edits return updated metadata.
 Kotlin abstract/sealed declarations retain `ABSTRACT_CLASS`; anonymous implementations have
 a useful source location without an invented qualified name.
+
+### Bounded hierarchy pages with legacy tree compatibility
+
+Without `maxNodes` or `cursor`, call/type hierarchies keep nested trees and legacy limits.
+Explicit pagination returns bounded breadth-first pages with traversal-local `nodeId`,
+`parentId`, and `depth`. Continuations are scoped to the project, tool, and server session.
+A continuation budget limit preserves the computed page and reports `truncationReason`;
+narrow the query when `hasMore=true` has no cursor. Cancellation and indexing transitions
+propagate through reflective handlers instead of completing an empty hierarchy.
+Java fixtures and real Kotlin class-kind tests were run. Python/Go/PHP/Rust/JavaScript
+collector tests use neutral PSI; their native IDE plugin APIs have not been manually verified.

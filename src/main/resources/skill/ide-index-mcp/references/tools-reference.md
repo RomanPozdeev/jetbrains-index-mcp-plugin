@@ -256,41 +256,62 @@ Find parent methods that a given method overrides or implements.
 **Languages**: Java, Kotlin, Python, JS/TS, PHP (NOT Go, Rust).
 
 ### ide_type_hierarchy
-Get complete type inheritance hierarchy (supertypes and subtypes).
+
+Get the legacy nested type hierarchy, or bounded BFS pages when `maxNodes` is supplied.
+Legacy root/supertypes/subtypes share one handle budget: keep the root's handle and omit optional
+IDs above the budget while retaining all nodes. Use bounded pages when every node needs a handle.
+A query through a member's ID preserves that input declaration.
+When scope filtering hides an intermediate type, eligible descendants remain discoverable under
+their nearest included ancestor.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | no | Exact type handle from a previous result. |
 | `className` | string | no | FQN (preferred, faster). E.g., `com.example.MyClass` |
 | `file` | string | no | Alternative: project-relative file path. Unlike other read-only navigation tools, `ide_type_hierarchy` file mode does not resolve dependency/library absolute paths or `jar://` URLs. |
 | `line` | integer | no | Required with file |
 | `column` | integer | no | Required with file |
+| `language` | string | no | Language for a qualified semantic target; requires an installed symbol-reference handler |
+| `symbol` | string | no | Fully qualified symbol reference used with `language` |
+| `maxNodes` | integer | no | Opt into paging with 1–500 nodes; omit for a legacy tree. Cursor default 100 |
+| `cursor` | string | no | Opaque continuation from the previous page. Target/search parameters are ignored; `maxNodes` may set the next page size |
 | `scope` | enum | no | One of `project_files` (default), `project_and_libraries`, `project_production_files`, `project_test_files` |
 | `includeGenerated` | boolean | no | Include supertypes/subtypes in generated sources (KSP/Dagger/annotation-processor output). Default true — keeps generated types in the hierarchy |
 | `project_path` | string | no | Project root path |
 
-**Provide either** `className` **or** `file`+`line`+`column`.
-**Returns**: `{ element: {name, file, kind, language, supertypes?}, supertypes: [{name, file, kind, language, supertypes?}], subtypes: [{name, file, kind, language, supertypes?}] }`
+**Provide exactly one target:** one nested `target` variant, or legacy `symbolId`, `className`, `language`+`symbol`, or `file`+`line`+`column`.
+**Returns**: `{ element: {symbolId?, name, file, kind, language}, supertypes: [{symbolId?, name, file, kind, language}], subtypes: [{symbolId?, name, file, kind, language}], traversal: [{direction: "supertype"|"subtype", element: {...}}], returnedNodes, truncated, elapsedMs, hasMore, cursor? }`
+**Pagination**: Without `maxNodes`/`cursor`, legacy nested trees and limits remain. Explicit pages expose traversal-local `nodeId`, `parentId`, and `depth` for the first-discovery tree; `returnedNodes` excludes the root. Type `traversal` preserves combined BFS order. Follow `cursor` while present. Retention limits return the computed page with `hasMore=true`, no cursor, and `truncationReason`; narrow the query to continue. Cursors are session/project-bound, expire after ten idle minutes, and retain at most 128 snapshots overall and ten per traversal. Handles refresh on every page.
 **Languages**: Java, Kotlin, Python, JS/TS, PHP, Rust.
 
 ### ide_call_hierarchy
-Build call tree showing who calls a method or what a method calls.
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+Build call tree showing who calls a method or what a method calls.
+Kotlin getter/setter handles identify distinct callable bodies. A source property or parameter
+used as input keeps its original ID binding even if the hierarchy selects a related callable.
+
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Exact callable handle from a previous result. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column. Required for position-based lookup. |
 | `language` | string | conditional | Symbol language (e.g., `"Java"`). Required for symbol-based lookup. |
 | `symbol` | string | conditional | Fully qualified symbol reference. For JS/TS, use module-qualified forms: `modulePath#exportName`, `modulePath#default`, or `modulePath#ClassName.memberName`. Required for symbol-based lookup. |
 | `direction` | enum | yes | `callers` or `callees` |
-| `depth` | integer | no | Recursion depth (default 3, max 5) |
+| `depth` | integer | no | Traversal depth across all pages (default 3, max 5) |
+| `maxNodes` | integer | no | Opt into paging with 1–500 nodes; omit for a legacy tree. Cursor default 100 |
+| `cursor` | string | no | Opaque continuation from the previous page. Target/search parameters are ignored; `maxNodes` may set the next page size |
 | `scope` | enum | no | One of `project_files` (default), `project_and_libraries`, `project_production_files`, `project_test_files` |
 | `includeGenerated` | boolean | no | Include callers/callees in generated sources (KSP/Dagger/annotation-processor output). Default true |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ element: {name, file, line, column, language}, calls: [{name, file, line, column, language, children: [...]}] }`
+**Returns**: `{ element: {symbolId?, name, file, line, column, language}, calls: [{symbolId?, name, file, line, column, language}], returnedNodes, truncated, elapsedMs, hasMore, cursor? }`
+Large legacy trees retain all nodes but may omit optional handles after the response handle budget;
+the root keeps its handle. Use bounded pages to obtain handles for every returned page.
+**Pagination**: Without `maxNodes`/`cursor`, legacy nested trees and limits remain. Explicit pages expose traversal-local `nodeId`, `parentId`, and `depth` for the first-discovery tree; `returnedNodes` excludes the root. Type `traversal` preserves combined BFS order. Follow `cursor` while present. Retention limits return the computed page with `hasMore=true`, no cursor, and `truncationReason`; narrow the query to continue. Cursors are session/project-bound, expire after ten idle minutes, and retain at most 128 snapshots overall and ten per traversal. Handles refresh on every page.
 
 ### ide_file_structure (disabled by default)
 Get hierarchical file structure like IDE's Structure panel. Each element includes both start and end line numbers (e.g., `(lines 42-65)` for multi-line elements, `(line 42)` for single-line elements).

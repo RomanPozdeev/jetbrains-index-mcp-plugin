@@ -2678,7 +2678,12 @@ Navigation tools appear according to installed language plugins. PHP file struct
 
 ### ide_type_hierarchy
 
-Retrieves the complete type hierarchy for a class or interface.
+Retrieves the legacy nested type hierarchy, or bounded breadth-first pages when `maxNodes` is supplied.
+
+Legacy responses share one handle budget across the root, supertypes and subtypes. The root keeps
+its ID; all nodes remain present, with optional IDs omitted after the budget. Use bounded pages
+when every returned node needs an ID. Querying through a member's ID does not rebind that input ID
+to its enclosing type.
 
 **Use when:**
 - Exploring class inheritance chains
@@ -2690,14 +2695,20 @@ Retrieves the complete type hierarchy for a class or interface.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | No* | Exact type handle returned by a semantic result. |
 | `file` | string | No* | Path to the file relative to project root |
 | `line` | integer | No* | 1-based line number |
 | `column` | integer | No* | 1-based column number |
 | `className` | string | No* | Fully qualified class name (alternative to position) |
+| `language` | string | No* | Language for a qualified semantic target; must have an installed symbol-reference handler |
+| `symbol` | string | No* | Fully qualified symbol reference used with `language` |
+| `maxNodes` | integer | No | Opt into pagination with 1–500 nodes. Omit for a legacy tree; cursor pages default to 100 |
+| `cursor` | string | No | Opaque continuation from a previous page. When present, target/search options are ignored; `maxNodes` may set the next page size |
 | `scope` | string | No | Built-in search scope. One of `project_files` (default), `project_and_libraries`, `project_production_files`, `project_test_files` |
 | `includeGenerated` | boolean | No | Include supertypes/subtypes in generated sources (KSP/Dagger/annotation-processor output). Default: true — keeps generated types in the hierarchy |
 
-*Either `file`/`line`/`column` OR `className` must be provided.
+*Provide exactly one nested `target` variant, or one legacy target: `symbolId`,
+`file`/`line`/`column`, `language`/`symbol`, or `className`.
 
 **Rust note:** `className` is not supported for Rust — use `file` + `line` + `column` instead.
 
@@ -2709,6 +2720,7 @@ Retrieves the complete type hierarchy for a class or interface.
   "params": {
     "name": "ide_type_hierarchy",
     "arguments": {
+      "maxNodes": 100,
       "file": "src/main/java/com/example/ArrayList.java",
       "line": 5,
       "column": 14
@@ -2725,6 +2737,7 @@ Retrieves the complete type hierarchy for a class or interface.
   "params": {
     "name": "ide_type_hierarchy",
     "arguments": {
+      "maxNodes": 100,
       "className": "java.util.ArrayList",
       "scope": "project_and_libraries"
     }
@@ -2740,6 +2753,7 @@ Retrieves the complete type hierarchy for a class or interface.
   "params": {
     "name": "ide_type_hierarchy",
     "arguments": {
+      "maxNodes": 100,
       "className": "App\\Models\\User"
     }
   }
@@ -2751,35 +2765,118 @@ Retrieves the complete type hierarchy for a class or interface.
 ```json
 {
   "element": {
+    "symbolId": "sym_user-service-impl",
     "name": "com.example.UserServiceImpl",
     "file": "src/main/java/com/example/UserServiceImpl.java",
     "kind": "CLASS",
-    "language": "Java"
+    "language": "Java",
+    "nodeId": "n0",
+    "depth": 0
   },
   "supertypes": [
     {
+      "symbolId": "sym_user-service",
       "name": "com.example.UserService",
       "file": "src/main/java/com/example/UserService.java",
       "kind": "INTERFACE",
-      "language": "Java"
+      "language": "Java",
+      "nodeId": "n1",
+      "parentId": "n0",
+      "depth": 1
     },
     {
+      "symbolId": "sym_base-service",
       "name": "com.example.BaseService",
       "file": "src/main/java/com/example/BaseService.java",
       "kind": "ABSTRACT_CLASS",
-      "language": "Java"
+      "language": "Java",
+      "nodeId": "n2",
+      "parentId": "n0",
+      "depth": 1
     }
   ],
   "subtypes": [
     {
+      "symbolId": "sym_admin-user-service-impl",
       "name": "com.example.AdminUserServiceImpl",
       "file": "src/main/java/com/example/AdminUserServiceImpl.java",
       "kind": "CLASS",
-      "language": "Java"
+      "language": "Java",
+      "nodeId": "n3",
+      "parentId": "n0",
+      "depth": 1
     }
-  ]
+  ],
+  "traversal": [
+    {
+      "direction": "supertype",
+      "element": {
+        "symbolId": "sym_user-service",
+        "name": "com.example.UserService",
+        "file": "src/main/java/com/example/UserService.java",
+        "kind": "INTERFACE",
+        "language": "Java",
+        "nodeId": "n1",
+        "parentId": "n0",
+        "depth": 1
+      }
+    },
+    {
+      "direction": "supertype",
+      "element": {
+        "symbolId": "sym_base-service",
+        "name": "com.example.BaseService",
+        "file": "src/main/java/com/example/BaseService.java",
+        "kind": "ABSTRACT_CLASS",
+        "language": "Java",
+        "nodeId": "n2",
+        "parentId": "n0",
+        "depth": 1
+      }
+    },
+    {
+      "direction": "subtype",
+      "element": {
+        "symbolId": "sym_admin-user-service-impl",
+        "name": "com.example.AdminUserServiceImpl",
+        "file": "src/main/java/com/example/AdminUserServiceImpl.java",
+        "kind": "CLASS",
+        "language": "Java",
+        "nodeId": "n3",
+        "parentId": "n0",
+        "depth": 1
+      }
+    }
+  ],
+  "returnedNodes": 3,
+  "truncated": false,
+  "elapsedMs": 14,
+  "hasMore": false,
+  "cursor": null
 }
 ```
+
+Without `maxNodes`/`cursor`, the response preserves nested `supertypes` and the original independent
+subtype limit. Supply `maxNodes` to opt into paging. In paged mode, `returnedNodes == traversal.size`
+and excludes the repeated root. `traversal` carries the combined BFS order; `supertypes` and `subtypes`
+are filtered views. Each node carries `nodeId`, `parentId` and `depth` for its first-discovery parent
+(root depth 0). These traversal-local IDs remain stable across pages and are independent of symbol
+handles. `maxNodes` bounds returned nodes and expansion work.
+
+Follow `cursor` while present. If a retention budget is exhausted, the computed page remains usable:
+`hasMore` and `truncated` are true, `cursor` is null, and `truncationReason` explains how to narrow the
+query. This is a terminal resource limit, not a complete hierarchy.
+
+Hierarchy cursors store the remaining PSI frontier as smart pointers and are scoped to the exact
+project and MCP session. The independent cache keeps at most 128 snapshots and ten per traversal,
+expires entries after ten minutes without access, and enforces aggregate pointer/text budgets.
+Eviction prefers old replay snapshots to the latest frontier; replay retention is bounded, not
+guaranteed for an entire traversal. Repeating a live cursor with the same page size and PSI version
+reuses its retained successor cursor. Returned handles are rebound on each page independently of
+cursor TTL, so symbol-cache eviction cannot leave stale IDs in an otherwise valid page.
+An expired, evicted, wrong-project, wrong-tool, or invalidated cursor must
+restart the query without `cursor`. The Streamable HTTP transport is stateless between requests and
+does not reliably deliver live progress; page metadata is the progress contract.
 
 **Kind Values:**
 - `CLASS` - Concrete class
@@ -2801,19 +2898,22 @@ Analyzes method call relationships to find callers or callees.
 - Analyzing impact of method changes
 - Debugging to understand how a method is reached
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Exact callable handle. Omit coordinates and name selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
 | `language` | string | Conditional | Language of the symbol (e.g., `"Java"`). Required for symbol-based lookup. |
 | `symbol` | string | Conditional | Fully qualified symbol reference. Required for symbol-based lookup. |
 | `direction` | string | Yes | `"callers"` or `"callees"` |
-| `depth` | integer | No | How deep to traverse (default: 3, max: 5) |
+| `depth` | integer | No | How deep to traverse across all pages (default: 3, max: 5) |
+| `maxNodes` | integer | No | Opt into pagination with 1–500 nodes. Omit for a legacy tree; cursor pages default to 100 |
+| `cursor` | string | No | Opaque continuation from a previous page. When present, target/search options are ignored; `maxNodes` may set the next page size |
 | `scope` | string | No | Built-in search scope. One of `project_files` (default), `project_and_libraries`, `project_production_files`, `project_test_files` |
 | `includeGenerated` | boolean | No | Include callers/callees in generated sources (KSP/Dagger/annotation-processor output). Default: true |
 
@@ -2825,6 +2925,7 @@ Analyzes method call relationships to find callers or callees.
   "params": {
     "name": "ide_call_hierarchy",
     "arguments": {
+      "maxNodes": 100,
       "file": "src/main/java/com/example/UserService.java",
       "line": 20,
       "column": 10,
@@ -2842,6 +2943,7 @@ Analyzes method call relationships to find callers or callees.
   "params": {
     "name": "ide_call_hierarchy",
     "arguments": {
+      "maxNodes": 100,
       "language": "Java",
       "symbol": "com.example.UserService#validateUser(String)",
       "direction": "callers",
@@ -2856,30 +2958,58 @@ Analyzes method call relationships to find callers or callees.
 ```json
 {
   "element": {
+    "symbolId": "sym_validate-user",
     "name": "UserService.validateUser(String)",
     "file": "src/main/java/com/example/UserService.java",
     "line": 20,
     "column": 17,
-    "language": "Java"
+    "language": "Java",
+    "nodeId": "n0",
+    "depth": 0
   },
   "calls": [
     {
+      "symbolId": "sym_create-user",
       "name": "UserController.createUser(UserRequest)",
       "file": "src/main/java/com/example/UserController.java",
       "line": 45,
       "column": 17,
-      "language": "Java"
+      "language": "Java",
+      "nodeId": "n1",
+      "parentId": "n0",
+      "depth": 1
     },
     {
+      "symbolId": "sym_update-user",
       "name": "UserController.updateUser(String, UserRequest)",
       "file": "src/main/java/com/example/UserController.java",
       "line": 62,
       "column": 17,
-      "language": "Java"
+      "language": "Java",
+      "nodeId": "n2",
+      "parentId": "n0",
+      "depth": 1
     }
-  ]
+  ],
+  "returnedNodes": 2,
+  "truncated": true,
+  "elapsedMs": 22,
+  "hasMore": true,
+  "cursor": "hier_opaque-continuation"
 }
 ```
+
+Without `maxNodes`/`cursor`, `calls` retains nested `children` and the original per-node limits.
+Kotlin getter and setter handles remain distinct callable targets, each expanding its own body.
+Querying a source property or parameter does not rebind its input ID to the selected callable.
+
+Large legacy trees may omit optional `symbolId` values once the response's handle budget is used;
+the root keeps its handle. Use `maxNodes` and follow `cursor` to obtain handles for every page.
+Supply `maxNodes` to receive bounded BFS pages with traversal-local `nodeId`, `parentId`, and `depth`
+for the first-discovery tree. `returnedNodes` excludes the root. Follow `cursor` while present;
+retention-budget exhaustion returns the computed page and `truncationReason` with `hasMore=true`
+and no cursor. Narrow the query to continue. Cursor lifetime and response metadata follow
+[`ide_type_hierarchy`](#ide_type_hierarchy).
 
 ---
 
