@@ -21,6 +21,8 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class FindDefinitionTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     companion object {
         private const val DEFAULT_MAX_PREVIEW_LINES = 50
         private const val MAX_ALLOWED_PREVIEW_LINES = 500
@@ -46,6 +48,7 @@ class FindDefinitionTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
         .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)

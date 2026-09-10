@@ -720,3 +720,11 @@ When `project_path` is omitted, the handle identifies its owning open project. H
 on server restart, project close, deletion, one hour of inactivity, or eviction from the
 4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
 different IDs can identify the same declaration, so do not compare IDs for symbol equality.
+
+### Structured lookup targets
+
+`ide_find_definition` and `ide_symbol_info` also accept a nested `target` with exactly one
+variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "line": 3,
+"column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
+Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
+Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.

@@ -146,6 +146,9 @@ abstract class AbstractMcpTool : McpTool {
      */
     protected open val participatesInLifecycle: Boolean = true
 
+    /** Whether this tool accepts the additive nested target selector. */
+    protected open val supportsUnifiedTarget: Boolean = false
+
     /**
      * Human-readable list of languages that currently support language+symbol lookup.
      */
@@ -245,12 +248,20 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
             }
         }
 
+        val normalizedArguments = if (supportsUnifiedTarget) {
+            UnifiedTargetArguments.normalize(arguments).getOrElse {
+                return createErrorResult(it.message ?: "Invalid target")
+            }
+        } else {
+            arguments
+        }
+
         val settings = McpSettings.getInstance()
-        if (needsPsiSync(arguments) && settings.syncExternalChanges) {
+        if (needsPsiSync(normalizedArguments) && settings.syncExternalChanges) {
             ensurePsiUpToDate(project)
         }
         return try {
-            doExecute(project, arguments)
+            doExecute(project, normalizedArguments)
         } catch (e: com.intellij.openapi.project.IndexNotReadyException) {
             // The IDE entered dumb mode (reindexing) during this call.
             createErrorResult(
