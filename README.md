@@ -329,6 +329,15 @@ PHP file structure support requires the PHP plugin and is available in PhpStorm 
 > **Note**: Applied refactorings modify source files and support undo via
 > <kbd>Ctrl/Cmd+Z</kbd>. `dryRun: true` previews do not modify files or create an undo command.
 
+### Symbol handles across navigation and member editing
+
+Class, symbol, reference, implementation, and super-method searches return opaque `symbolId`
+handles for exact declarations. Reference and implementation searches plus `ide_edit_member` and
+`ide_replace_member` accept the same nested `target` variants as definition and symbol-info tools.
+Cached search pages remain marked `stale: true` after PSI edits and materialize handles only for
+the returned page from exact smart pointers. Deleted declarations and handles from another project
+or server session are rejected; successful member edits return current declaration metadata.
+
 ### Project Lifecycle Management Tools
 
 `ide_project_status` is enabled by default. All other lifecycle tools are disabled by default — enable them in Settings → Tools → Index MCP Server.

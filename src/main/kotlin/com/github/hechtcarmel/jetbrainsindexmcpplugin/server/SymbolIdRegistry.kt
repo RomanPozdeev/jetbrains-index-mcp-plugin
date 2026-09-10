@@ -1,12 +1,11 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.server
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiFileIdentity
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.vfs.VirtualFileWithId
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiInvalidElementAccessException
 import com.intellij.psi.SmartPointerManager
@@ -26,7 +25,7 @@ import java.util.LinkedHashMap
  * resolving the handle fails with `SYMBOL_ID_EXPIRED` instead of selecting a nearby element.
  *
  * Smart pointers retain their [Project] strongly and, for physical elements, may retain the
- * backing [VirtualFile] strongly too. Retention is therefore bounded deliberately: the
+ * backing [com.intellij.openapi.vfs.VirtualFile] strongly too. Retention is therefore bounded deliberately: the
  * project-close listener removes a project's entries immediately, the inactivity TTL and LRU cap
  * reclaim idle entries, and a server-session reset clears the whole registry. Each entry also
  * keeps a weak project identity check (not merely a path), preventing an ID created for a closed
@@ -44,7 +43,7 @@ class SymbolIdRegistry @JvmOverloads constructor(
     private data class Entry(
         val project: WeakReference<Project>,
         var pointer: SmartPsiElementPointer<PsiElement>,
-        var fileIdentity: FileIdentity?,
+        var fileIdentity: PsiFileIdentity?,
         var guardedSourceStamp: Long?,
         val generation: Long,
         var lastAccessMillis: Long
@@ -53,25 +52,9 @@ class SymbolIdRegistry @JvmOverloads constructor(
     private data class ResolutionCandidate(
         val entry: Entry,
         val pointer: SmartPsiElementPointer<PsiElement>,
-        val fileIdentity: FileIdentity?,
+        val fileIdentity: PsiFileIdentity?,
         val guardedSourceStamp: Long?
     )
-
-    /** A smart pointer may recover by path after deletion; the original VFS identity must survive too. */
-    private class FileIdentity(file: VirtualFile) {
-        private val persistentId = (file as? VirtualFileWithId)?.id
-        private val protocol = file.fileSystem.protocol
-        private val reference = WeakReference(file)
-
-        fun matches(file: VirtualFile?): Boolean {
-            if (file == null || !file.isValid) return false
-            return if (persistentId != null) {
-                (file as? VirtualFileWithId)?.id == persistentId && file.fileSystem.protocol == protocol
-            } else {
-                reference.get() === file
-            }
-        }
-    }
 
     // Insertion order plus explicit promotion gives O(1) non-promoting ownership lookup.
     // It also keeps last-access times ordered for amortized prefix expiry.
@@ -149,7 +132,7 @@ class SymbolIdRegistry @JvmOverloads constructor(
         require(!project.isDisposed) { "Cannot bind a symbol from a disposed project" }
         val element = pointer.element
         require(element?.isValid == true) { "Cannot bind an invalid PSI element" }
-        val fileIdentity = pointer.virtualFile?.let(::FileIdentity)
+        val fileIdentity = pointer.virtualFile?.let(::PsiFileIdentity)
         val guardedSourceStamp = guardedSourceStamp(element)
         return serverEpoch.ifCurrent(
             expectedEpoch = expectedGeneration,
@@ -291,6 +274,18 @@ class SymbolIdRegistry @JvmOverloads constructor(
         }
     }
 
+    /** Explicitly invalidates a handle after deleting its declaration. */
+    fun invalidate(symbolId: String) {
+        val expectedGeneration = serverEpoch.expectedForCurrentRequest()
+        serverEpoch.ifCurrent(expectedGeneration, stale = {}) {
+            synchronized(this) {
+                if (entries[symbolId]?.generation == expectedGeneration) {
+                    remove(symbolId, CacheEvictionReason.INVALIDATED)
+                }
+            }
+        }
+    }
+
     @Synchronized
     internal fun sizeForTest(): Int {
         evictExpiredPrefix(clock())
@@ -303,7 +298,10 @@ class SymbolIdRegistry @JvmOverloads constructor(
     }
 
     @Synchronized
-    internal fun stats(): CacheStats = counters.snapshot(entries.size)
+    internal fun stats(): CacheStats = counters.snapshot(
+        entries = entries.size,
+        pointers = entries.size.toLong()
+    )
 
     @Synchronized
     internal fun removeProject(project: Project) {

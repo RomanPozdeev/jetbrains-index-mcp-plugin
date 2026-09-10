@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.python
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.rethrowIfControlFlow
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.*
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.toArgumentFailure
@@ -445,10 +446,12 @@ class PythonImplementationsHandler : BasePythonHandler<List<ImplementationData>>
                         line = getLineNumber(project, overridingMethod) ?: 0,
                         column = getColumnNumber(project, overridingMethod) ?: 0,
                         kind = "METHOD",
-                        language = "Python"
+                        language = "Python",
+                        pointerTarget = overridingMethod
                     )
                 }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             emptyList()
         }
     }
@@ -477,10 +480,12 @@ class PythonImplementationsHandler : BasePythonHandler<List<ImplementationData>>
                         line = getLineNumber(project, inheritor) ?: 0,
                         column = getColumnNumber(project, inheritor) ?: 0,
                         kind = "CLASS",
-                        language = "Python"
+                        language = "Python",
+                        pointerTarget = inheritor
                     )
                 }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             emptyList()
         }
     }
@@ -766,7 +771,8 @@ class PythonSuperMethodsHandler : BasePythonHandler<SuperMethodsData>(), SuperMe
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, pyFunction) ?: 0,
             column = getColumnNumber(project, pyFunction) ?: 0,
-            language = "Python"
+            language = "Python",
+            pointerTarget = pyFunction
         )
 
         val hierarchy = buildHierarchy(project, pyFunction)
@@ -812,13 +818,15 @@ class PythonSuperMethodsHandler : BasePythonHandler<SuperMethodsData>(), SuperMe
                         column = getColumnNumber(project, superMethod),
                         isInterface = false,
                         depth = depth,
-                        language = "Python"
+                        language = "Python",
+                        pointerTarget = superMethod
                     ))
 
                     hierarchy.addAll(buildHierarchy(project, superMethod, visited, depth + 1))
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             // Handle gracefully
         }
 
@@ -837,6 +845,7 @@ class PythonSuperMethodsHandler : BasePythonHandler<SuperMethodsData>(), SuperMe
                     val getNameMethod = param.javaClass.getMethod("getName")
                     getNameMethod.invoke(param) as? String
                 } catch (e: Exception) {
+                    e.rethrowIfControlFlow()
                     null
                 }
             }.joinToString(", ")
@@ -844,6 +853,7 @@ class PythonSuperMethodsHandler : BasePythonHandler<SuperMethodsData>(), SuperMe
             val functionName = getName(pyFunction) ?: "unknown"
             "$functionName($params)"
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             getName(pyFunction) ?: "unknown"
         }
     }

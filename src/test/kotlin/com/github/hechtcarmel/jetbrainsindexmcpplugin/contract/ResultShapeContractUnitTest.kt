@@ -381,7 +381,8 @@ class ResultShapeContractUnitTest : TestCase() {
             line = 42,
             column = 17,
             containerName = "Service",
-            language = "JAVA"
+            language = "JAVA",
+            symbolId = "sym_match"
         )
         val buildMessage = BuildMessage(
             category = "ERROR",
@@ -468,7 +469,9 @@ class ResultShapeContractUnitTest : TestCase() {
             line = 12,
             column = 14,
             kind = "class",
-            language = "JAVA"
+            language = "JAVA",
+            qualifiedName = "com.example.DefaultService",
+            symbolId = "sym_implementation"
         )
         val methodInfo = MethodInfo(
             name = "handle",
@@ -477,7 +480,8 @@ class ResultShapeContractUnitTest : TestCase() {
             file = "src/main/java/com/example/Service.java",
             line = 42,
             column = 17,
-            language = "JAVA"
+            language = "JAVA",
+            symbolId = "sym_method"
         )
         val updatedSymbol = ResolvedSymbolInfo(
             symbolId = "sym_updated",
@@ -558,6 +562,7 @@ class ResultShapeContractUnitTest : TestCase() {
                     pageSize = 25,
                     stale = true,
                     resolvedSymbol = ResolvedSymbolInfo(
+                        symbolId = "sym_resolved",
                         name = "handle",
                         kind = "method",
                         container = "com.example.Service",
@@ -839,7 +844,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     column = 21,
                     isInterface = true,
                     depth = 2,
-                    language = "JAVA"
+                    language = "JAVA",
+                    symbolId = "sym_super_method"
                 )
             ),
             struct(
@@ -1085,7 +1091,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     file = "src/main/java/com/example/Service.java",
                     message = "Replaced 'handle'",
                     startLine = 42,
-                    endLine = 55
+                    endLine = 55,
+                    updatedSymbol = updatedSymbol
                 )
             ),
             struct(

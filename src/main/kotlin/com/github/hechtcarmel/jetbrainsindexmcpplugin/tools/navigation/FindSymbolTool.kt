@@ -7,7 +7,6 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScop
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.OptimizedSymbolSearch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.SymbolData
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FindSymbolResult
@@ -16,6 +15,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
+import com.intellij.psi.SmartPointerManager
 import com.intellij.psi.util.PsiModificationTracker
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
@@ -117,7 +117,6 @@ class FindSymbolTool : AbstractMcpTool() {
                 limit = collectLimit,
                 languageFilter = nativeLanguageFilter
             )
-
             val matches = symbols.map { it.toSymbolMatch() }
 
             val searchExtender: suspend (Set<String>, Int) -> List<PaginationService.SerializedResult> = { seenKeys, limit ->
@@ -129,7 +128,10 @@ class FindSymbolTool : AbstractMcpTool() {
             val serializedResults = matches.map { sym ->
                 PaginationService.SerializedResult(
                     key = sym.paginationKey(),
-                    data = json.encodeToJsonElement(sym)
+                    data = json.encodeToJsonElement(sym),
+                    symbolPointer = sym.pointerTarget?.let {
+                        SmartPointerManager.getInstance(project).createSmartPsiElementPointer(it)
+                    }
                 )
             }
 
@@ -140,7 +142,7 @@ class FindSymbolTool : AbstractMcpTool() {
                 seenKeys = serializedResults.map { it.key }.toSet(),
                 searchExtender = searchExtender,
                 psiModCount = PsiModificationTracker.getInstance(project).modificationCount,
-                projectBasePath = ProjectResolver.normalizePath(project.basePath ?: ""),
+                project = project,
                 metadata = mapOf("query" to query)
             )
         }
@@ -191,7 +193,10 @@ class FindSymbolTool : AbstractMcpTool() {
             .map { sym ->
                 PaginationService.SerializedResult(
                     key = sym.paginationKey(),
-                    data = json.encodeToJsonElement(sym)
+                    data = json.encodeToJsonElement(sym),
+                    symbolPointer = sym.pointerTarget?.let {
+                        SmartPointerManager.getInstance(project).createSmartPsiElementPointer(it)
+                    }
                 )
             }
             .toList()
@@ -205,7 +210,9 @@ class FindSymbolTool : AbstractMcpTool() {
         line = line,
         column = column,
         containerName = containerName,
-        language = language
+        language = language,
+        symbolId = PaginationService.UNMATERIALIZED_SYMBOL_ID,
+        pointerTarget = pointerTarget
     )
 
     private fun SymbolMatch.paginationKey(): String = "$file:$line:$column:$name"

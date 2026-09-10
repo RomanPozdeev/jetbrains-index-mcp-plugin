@@ -44,7 +44,12 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
         if (ktFileClass?.isInstance(psiFile) != true) return null
 
         if (className == null) {
-            val declarations = try { getDeclarations(psiFile) } catch (_: Exception) { emptyList() }
+            val declarations = try {
+                getDeclarations(psiFile)
+            } catch (e: Exception) {
+                e.rethrowIfControlFlow()
+                emptyList()
+            }
             val classes = declarations.filter {
                 ktClassClass?.isInstance(it) == true || ktObjectDeclarationClass?.isInstance(it) == true
             }
@@ -58,6 +63,7 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
             val declarations = getDeclarations(psiFile)
             findClassInDeclarations(declarations, className)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Failed to find Kotlin class: ${e.message}")
             null
         }
@@ -94,6 +100,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
         return results
     }
 
+    override fun resolveMember(element: PsiElement): ResolvedMember? = resolveDeclaration(element)
+
     override fun getInsertionOffset(scope: PsiElement, position: String, anchor: ResolvedMember?): Int? {
         return when (position) {
             "before" -> {
@@ -109,7 +117,10 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
                     val body = getBody(scope) ?: return null
                     val lBrace = try {
                         body.javaClass.getMethod("getLBrace").invoke(body) as? PsiElement
-                    } catch (_: Exception) { null }
+                    } catch (e: Exception) {
+                        e.rethrowIfControlFlow()
+                        null
+                    }
                     lBrace?.textRange?.endOffset ?: return null
                 } else if (scope is PsiFile) {
                     // Offset 0 would place the member before the package directive and imports —
@@ -123,7 +134,10 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
                     val body = getBody(scope) ?: return null
                     val rBrace = try {
                         body.javaClass.getMethod("getRBrace").invoke(body) as? PsiElement
-                    } catch (_: Exception) { null }
+                    } catch (e: Exception) {
+                        e.rethrowIfControlFlow()
+                        null
+                    }
                         rBrace?.textRange?.startOffset ?: return null
                 } else scope.textRange.endOffset
             }
@@ -144,7 +158,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
     private fun getChildElement(element: PsiElement, accessor: String): PsiElement? {
         return try {
             element.javaClass.getMethod(accessor).invoke(element) as? PsiElement
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -209,7 +224,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
             val method = element.javaClass.getMethod("getDeclarations")
             @Suppress("UNCHECKED_CAST")
             (method.invoke(element) as? List<PsiElement>) ?: emptyList()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             emptyList()
         }
     }
@@ -220,7 +236,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
             val method = body.javaClass.getMethod("getDeclarations")
             @Suppress("UNCHECKED_CAST")
             (method.invoke(body) as? List<PsiElement>) ?: emptyList()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             body.children.toList()
         }
     }
@@ -228,7 +245,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
     private fun getBody(element: PsiElement): PsiElement? {
         return try {
             element.javaClass.getMethod("getBody").invoke(element) as? PsiElement
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -236,7 +254,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
     private fun getBodyExpression(function: PsiElement): PsiElement? {
         return try {
             function.javaClass.getMethod("getBodyExpression").invoke(function) as? PsiElement
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -255,7 +274,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
             if (lBrace != null && rBrace != null) {
                 Pair(lBrace.textRange.endOffset, rBrace.textRange.startOffset)
             } else null
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -263,7 +283,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
     private fun getInitializer(property: PsiElement): PsiElement? {
         return try {
             property.javaClass.getMethod("getInitializer").invoke(property) as? PsiElement
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -272,7 +293,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
         if (ktNamedDeclarationClass?.isInstance(element) != true) return null
         return try {
             element.javaClass.getMethod("getName").invoke(element) as? String
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -283,7 +305,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
                 ?: return 0
             val params = paramList.javaClass.getMethod("getParameters").invoke(paramList) as? List<*>
             params?.size ?: 0
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -292,7 +315,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
         return try {
             val typeRef = property.javaClass.getMethod("getTypeReference").invoke(property) as? PsiElement
             typeRef?.text
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -306,7 +330,8 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
             } else ""
             val name = getName(function) ?: "unknown"
             "$name($params)"
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             getName(function) ?: "unknown"
         }
     }
@@ -315,13 +340,19 @@ class KotlinMemberResolver(private val project: Project) : MemberResolver {
         return try {
             val lBrace = body.javaClass.getMethod("getLBrace").invoke(body) as? PsiElement
             lBrace?.textRange?.endOffset
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
+            null
+        }
     }
 
     private fun getRBraceStart(body: PsiElement): Int? {
         return try {
             val rBrace = body.javaClass.getMethod("getRBrace").invoke(body) as? PsiElement
             rBrace?.textRange?.startOffset
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            e.rethrowIfControlFlow()
+            null
+        }
     }
 }

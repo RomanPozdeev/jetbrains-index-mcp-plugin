@@ -23,6 +23,8 @@ interface MemberResolver {
     fun isAvailable(): Boolean
     fun findClass(psiFile: PsiFile, className: String?): PsiElement?
     fun findMembers(scope: PsiElement, memberName: String): List<ResolvedMember>
+    /** Resolves this exact declaration; must not walk to a parent or nearby member. */
+    fun resolveMember(element: PsiElement): ResolvedMember?
     fun getInsertionOffset(scope: PsiElement, position: String, anchor: ResolvedMember?): Int?
 }
 

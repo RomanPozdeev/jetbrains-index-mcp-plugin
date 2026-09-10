@@ -16,7 +16,9 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.FindUsage
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation.TypeHierarchyTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.project.CreateModuleTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.ChangeSignatureTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.RenameSymbolTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.SafeDeleteTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.isExcludedPath
 import io.mockk.every
@@ -92,6 +94,23 @@ class ToolsUnitTest : TestCase() {
 
             val projectPathProp = properties?.get(ParamNames.PROJECT_PATH)?.jsonObject
             assertNotNull("${tool.name} schema should include project_path property", projectPathProp)
+        }
+    }
+
+    fun testRefactoringPreviewsStillParticipateInConfiguredPsiSync() {
+        val previewArguments = buildJsonObject {
+            put(ParamNames.DRY_RUN, true)
+        }
+
+        listOf(
+            RenameSymbolTool(),
+            SafeDeleteTool(),
+            ChangeSignatureTool()
+        ).forEach { tool ->
+            assertTrue(
+                "${tool.name} dry-run must honor configured VFS/PSI synchronization",
+                tool.needsPsiSync(previewArguments)
+            )
         }
     }
 
@@ -174,6 +193,25 @@ class ToolsUnitTest : TestCase() {
         val errorMessage = decision.javaClass.getMethod("getError").invoke(decision) as String
         assertEquals(ErrorMessages.LANGUAGE_SYMBOL_AND_OTHER_TARGET_EXCLUSIVE, errorMessage)
         assertFalse("Error must not claim that symbolId was provided", errorMessage.contains("symbolId"))
+    }
+
+    fun testRenameSymbolToolDoesNotReinterpretNestedPositionAsFileTarget() {
+        val normalized = UnifiedTargetArguments.normalize(
+            buildJsonObject {
+                put(ParamNames.TARGET_TYPE_CAMEL, kotlinx.serialization.json.JsonPrimitive("file"))
+                putJsonObject("target") {
+                    putJsonObject("position") {
+                        put("file", "src/Target.java")
+                        put("line", 4)
+                        put("column", 8)
+                    }
+                }
+            }
+        ).getOrThrow()
+
+        val decision = RenameSymbolTool.resolveRenameMode(normalized)
+
+        assertEquals("Nested position always denotes a symbol target", "InvalidRenameMode", decision.javaClass.simpleName)
     }
 
     private fun invokeRenameModeResolver(targetType: String?, line: Int?, column: Int?): Any {

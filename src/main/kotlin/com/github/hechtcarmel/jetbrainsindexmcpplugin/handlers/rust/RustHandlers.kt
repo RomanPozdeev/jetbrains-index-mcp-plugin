@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.rust
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.rethrowIfControlFlow
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.*
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PluginDetectors
@@ -792,7 +793,8 @@ class RustImplementationsHandler : BaseRustHandler<List<ImplementationData>>(), 
                             line = getLineNumber(project, definition) ?: 0,
                             column = getColumnNumber(project, definition) ?: 0,
                             kind = "IMPL",
-                            language = "Rust"
+                            language = "Rust",
+                            pointerTarget = definition
                         ))
                     }
                 }
@@ -801,6 +803,7 @@ class RustImplementationsHandler : BaseRustHandler<List<ImplementationData>>(), 
 
             LOG.debug("Found ${results.size} trait implementations")
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Error finding trait implementations: ${e.message}")
         }
 
@@ -838,7 +841,8 @@ class RustImplementationsHandler : BaseRustHandler<List<ImplementationData>>(), 
                             line = getLineNumber(project, definition) ?: 0,
                             column = getColumnNumber(project, definition) ?: 0,
                             kind = "METHOD",
-                            language = "Rust"
+                            language = "Rust",
+                            pointerTarget = definition
                         ))
                     }
                 }
@@ -847,6 +851,7 @@ class RustImplementationsHandler : BaseRustHandler<List<ImplementationData>>(), 
 
             LOG.debug("Found ${results.size} method implementations for $methodName")
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Error finding method implementations: ${e.message}")
         }
 
@@ -1174,7 +1179,8 @@ class RustSuperMethodsHandler : BaseRustHandler<SuperMethodsData>(), SuperMethod
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, function) ?: 0,
             column = getColumnNumber(project, function) ?: 0,
-            language = "Rust"
+            language = "Rust",
+            pointerTarget = function
         )
 
         val hierarchy = buildHierarchy(project, trait, methodName, mutableSetOf())
@@ -1202,7 +1208,8 @@ class RustSuperMethodsHandler : BaseRustHandler<SuperMethodsData>(), SuperMethod
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, function) ?: 0,
             column = getColumnNumber(project, function) ?: 0,
-            language = "Rust"
+            language = "Rust",
+            pointerTarget = function
         )
 
         // Find in supertraits
@@ -1249,7 +1256,8 @@ class RustSuperMethodsHandler : BaseRustHandler<SuperMethodsData>(), SuperMethod
                 column = getColumnNumber(project, traitMethod),
                 isInterface = true,  // Traits are like interfaces
                 depth = depth,
-                language = "Rust"
+                language = "Rust",
+                pointerTarget = traitMethod
             ))
         }
 
@@ -1289,6 +1297,7 @@ class RustSuperMethodsHandler : BaseRustHandler<SuperMethodsData>(), SuperMethod
             }
             "fn ${getName(function) ?: "unknown"}()"
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             "fn ${getName(function) ?: "unknown"}()"
         }
     }

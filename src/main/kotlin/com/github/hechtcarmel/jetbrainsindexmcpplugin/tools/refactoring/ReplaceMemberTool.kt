@@ -1,12 +1,17 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
-import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.UnifiedTargetArguments
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.*
 import com.intellij.openapi.project.Project
+import com.intellij.psi.SmartPointerManager
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -21,19 +26,27 @@ class ReplaceMemberTool : AbstractMcpTool() {
         For fields/properties: replaces the initializer expression (after =).
         Auto-reformats the changed range by default.
 
-        Requires: file (always), member (always). class is optional for top-level members (Kotlin).
+        Target the declaration with nested target ({symbolId}, {position: {file, line, column}},
+        or {qualifiedName, language}), top-level symbolId, top-level language + symbol, or the
+        legacy file + member selector. Do not combine selector forms. class is optional for
+        top-level members (Kotlin).
         For overloaded methods, use parameterCount or line to disambiguate.
 
         Examples:
+        - {"symbolId": "<opaque-id>", "content": "return 42;"}
+        - {"target": {"qualifiedName": "com.example.Main#getName()", "language": "Java"}, "content": "return this.name;"}
         - {"file": "src/Main.java", "class": "Main", "member": "getName", "content": "return this.name;"}
         - {"file": "src/Config.kt", "member": "defaultPort", "content": "8080"}
     """.trimIndent()
 
     override val inputSchema = SchemaBuilder.tool()
         .projectPath()
-        .file(description = "Path to file relative to project root. REQUIRED.")
+        .target()
+        .symbolId()
+        .languageAndSymbol(required = false)
+        .file(required = false, description = "Path to file relative to project root. Required with member selectors; omit when symbolId is used.")
         .stringProperty(ParamNames.CLASS, "Class/interface name containing the member. Optional for top-level members (Kotlin).")
-        .stringProperty(ParamNames.MEMBER, "Name of the method, function, field, or property to replace the body/initializer of.", required = true)
+        .stringProperty(ParamNames.MEMBER, "Name of the method, function, field, or property to replace the body/initializer of. Required unless symbolId is used.")
         .intProperty(ParamNames.PARAMETER_COUNT, "Number of parameters (for disambiguating overloaded methods).")
         .intProperty(ParamNames.LINE, "1-based line number of the member (for disambiguation when multiple members share the same name).")
         .stringProperty(ParamNames.CONTENT, "The new body content (without surrounding braces for methods) or new initializer expression.", required = true)
@@ -41,32 +54,114 @@ class ReplaceMemberTool : AbstractMcpTool() {
         .build()
 
     override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
-        val filePath = arguments[ParamNames.FILE]?.jsonPrimitive?.content
-            ?: return createErrorResult("Missing required parameter: file")
-        val memberName = arguments[ParamNames.MEMBER]?.jsonPrimitive?.content
-            ?: return createErrorResult("Missing required parameter: member")
+        val requestedSymbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+        val hasQualifiedTarget = optionalStringArg(arguments, ParamNames.LANGUAGE) != null ||
+            optionalStringArg(arguments, ParamNames.SYMBOL) != null
+        val hasStructuredTarget = optionalStringArg(arguments, UnifiedTargetArguments.NORMALIZED_VARIANT) != null
+        val memberName = optionalStringArg(arguments, ParamNames.MEMBER) ?: "<symbolId>"
         val content = arguments[ParamNames.CONTENT]?.jsonPrimitive?.content
             ?: return createErrorResult("Missing required parameter: content")
         val className = MemberEditingUtils.getOptionalString(arguments, ParamNames.CLASS)
         val parameterCount = MemberEditingUtils.getOptionalInt(arguments, ParamNames.PARAMETER_COUNT)
         val line = MemberEditingUtils.getOptionalInt(arguments, ParamNames.LINE)
         val reformat = MemberEditingUtils.getOptionalBoolean(arguments, ParamNames.REFORMAT)
+        val hasLegacyMemberSelector = listOf(ParamNames.FILE, ParamNames.CLASS, ParamNames.MEMBER).any {
+            optionalStringArg(arguments, it) != null
+        } || parameterCount != null || line != null
 
-        val virtualFile = resolveFile(project, filePath)
-            ?: return createErrorResult("File not found: $filePath")
-        ensureWritable(virtualFile)?.let { return it }
+        // Discover external files before the read action, where synchronous VFS refresh is unsafe.
+        // Normalized position targets need the same discovery as legacy member selectors.
+        val coordinateFile = if (requestedSymbolId == null && !hasQualifiedTarget) {
+            optionalStringArg(arguments, ParamNames.FILE)?.let { resolveFile(project, it) }
+        } else null
 
         val prep = suspendingReadAction {
-            prepareMemberEdit(project, virtualFile, filePath, className, memberName, parameterCount, line)
+            if (requestedSymbolId != null || hasQualifiedTarget || hasStructuredTarget) {
+                if (!hasStructuredTarget && hasLegacyMemberSelector) {
+                    Result.failure(IllegalArgumentException(ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE))
+                } else {
+                    prepareMemberEditBySemanticTarget(project, arguments, requestedSymbolId)
+                }
+            } else {
+                val filePath = optionalStringArg(arguments, ParamNames.FILE)
+                    ?: return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("Missing required parameter: ${ParamNames.FILE}")
+                    )
+                if (memberName == "<symbolId>") {
+                    return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("Missing required parameter: ${ParamNames.MEMBER}")
+                    )
+                }
+                val virtualFile = coordinateFile
+                    ?: return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("File not found: $filePath")
+                    )
+                if (!virtualFile.isWritable) {
+                    return@suspendingReadAction Result.failure(
+                        IllegalArgumentException("File is read-only and cannot be modified: ${virtualFile.path}")
+                    )
+                }
+                prepareMemberEdit(project, virtualFile, filePath, className, memberName, parameterCount, line)
+            }
         }
 
         return when {
             prep.isFailure -> prep.exceptionOrNull()!!.let { handleError(it, memberName) }
             else -> {
                 val p = prep.getOrThrow()
-                applyBodyReplacement(project, p, content, reformat)
+                applyBodyReplacement(project, p, content, reformat, requestedSymbolId)
             }
         }
+    }
+
+    private fun prepareMemberEditBySemanticTarget(
+        project: Project,
+        arguments: JsonObject,
+        symbolId: String?
+    ): Result<MemberEditPreparation> {
+        val rawElement = resolveElementFromArguments(project, arguments, allowSymbolId = true)
+            .getOrElse { return Result.failure(it) }
+        // Position selectors start at a leaf PSI token; resolve that token to the exact semantic
+        // declaration. Other selector variants already return declarations directly.
+        val declaration = if (
+            optionalStringArg(arguments, UnifiedTargetArguments.NORMALIZED_VARIANT) == UnifiedTargetArguments.POSITION
+        ) {
+            PsiUtils.resolveTargetElement(rawElement) ?: rawElement
+        } else {
+            rawElement
+        }
+        val element = MemberEditingUtils.resolveEditableSourceTarget(declaration).getOrElse {
+            return Result.failure(it)
+        }
+        val psiFile = element.containingFile
+            ?: return Result.failure(
+                IllegalArgumentException(symbolId?.let(ErrorMessages::symbolIdExpired) ?: "Target has no source file")
+            )
+        val virtualFile = psiFile.virtualFile
+            ?: return Result.failure(
+                IllegalArgumentException(symbolId?.let(ErrorMessages::symbolIdExpired) ?: "Target has no editable source file")
+            )
+        if (!virtualFile.isWritable) {
+            return Result.failure(IllegalArgumentException("File is read-only and cannot be modified: ${virtualFile.path}"))
+        }
+        val resolver = MemberEditingUtils.getResolver(psiFile, project)
+            ?: return Result.failure(
+                IllegalArgumentException("Member editing not supported for ${psiFile.language.displayName}. Supported: Java, Kotlin.")
+            )
+        val member = resolver.resolveMember(element)
+            ?: return Result.failure(IllegalArgumentException("Target does not identify an editable Java/Kotlin member"))
+        if (member.kind == "class") {
+            return Result.failure(
+                IllegalArgumentException(
+                    "Cannot replace body of a class declaration. Use ide_edit_member to replace the entire class declaration."
+                )
+            )
+        }
+        val document = MemberEditingUtils.getDocument(psiFile)
+            ?: return Result.failure(IllegalArgumentException("Cannot get document for file: ${virtualFile.path}"))
+        return Result.success(
+            MemberEditPreparation(psiFile, document, member, ProjectUtils.getToolFilePath(project, virtualFile))
+        )
     }
 
     private fun prepareMemberEdit(
@@ -113,9 +208,15 @@ class ReplaceMemberTool : AbstractMcpTool() {
         project: Project,
         prep: MemberEditPreparation,
         content: String,
-        reformat: Boolean
+        reformat: Boolean,
+        requestedSymbolId: String?
     ): CallToolResult {
         val member = prep.member
+        val pointer = suspendingReadAction {
+            SmartPointerManager.getInstance(project)
+                .createSmartPsiElementPointer(member.element)
+                .withOriginalFileIdentity()
+        }
         val originalBodyStart = member.bodyStartOffset
         val originalBodyEnd = member.bodyEndOffset
 
@@ -128,50 +229,79 @@ class ReplaceMemberTool : AbstractMcpTool() {
         var startLine = 0
         var endLine = 0
         var error: String? = null
+        var editApplied = false
+        var updatedSymbol: ResolvedSymbolInfo? = null
 
-        suspendingWriteAction(project, "Replace member body: ${member.name}") {
-            if (!member.element.isValid) {
-                error =
-                    "PSI element for '${member.name}' is no longer valid. The document may have been modified externally — retry the operation."
-                return@suspendingWriteAction
-            }
-            val currentRange = member.element.textRange
-            val delta = currentRange.startOffset - member.startOffset
-            val bodyStart = originalBodyStart + delta
-            val bodyEnd = originalBodyEnd + delta
-
-            val docLength = prep.document.textLength
-            if (bodyStart < 0 || bodyEnd > docLength || bodyStart > bodyEnd) {
-                error =
-                    "Body offsets [${bodyStart}, ${bodyEnd}) are out of bounds (document length: ${docLength}). The document may have been modified externally — retry the operation."
-                return@suspendingWriteAction
-            }
-
-            prep.document.replaceString(bodyStart, bodyEnd, content)
-            MemberEditingUtils.commitDocuments(project)
-            if (reformat) {
-                MemberEditingUtils.reformatRange(project, prep.psiFile, bodyStart, bodyStart + content.length)
+        try {
+            suspendingWriteAction(project, "Replace member body: ${member.name}") {
+                // Rebind after entering the write action. Offsets captured during preparation can
+                // become stale if the declaration itself changes before this action starts; merely
+                // shifting them by the declaration's start delta does not cover body/header edits.
                 MemberEditingUtils.commitDocuments(project)
+                val currentElement = pointer.element
+                val currentMember = currentElement
+                    ?.takeIf { it.isValid }
+                    ?.let { MemberEditingUtils.getResolver(prep.psiFile, project)?.resolveMember(it) }
+                if (currentMember == null) {
+                    error =
+                        "PSI element for '${member.name}' is no longer valid. The document may have been modified externally — retry the operation."
+                    return@suspendingWriteAction
+                }
+                val bodyStart = currentMember.bodyStartOffset
+                val bodyEnd = currentMember.bodyEndOffset
+                if (bodyStart == null || bodyEnd == null) {
+                    error =
+                        "Member '${member.name}' no longer has a body/initializer to replace. Retry after rediscovering the declaration."
+                    return@suspendingWriteAction
+                }
+
+                val docLength = prep.document.textLength
+                if (bodyStart < 0 || bodyEnd > docLength || bodyStart > bodyEnd) {
+                    error =
+                        "Body offsets [${bodyStart}, ${bodyEnd}) are out of bounds (document length: ${docLength}). The document may have been modified externally — retry the operation."
+                    return@suspendingWriteAction
+                }
+
+                prep.document.replaceString(bodyStart, bodyEnd, content)
+                editApplied = true
+                MemberEditingUtils.commitDocuments(project)
+                if (reformat) {
+                    MemberEditingUtils.reformatRange(project, prep.psiFile, bodyStart, bodyStart + content.length)
+                    MemberEditingUtils.commitDocuments(project)
+                }
+                startLine = MemberEditingUtils.safeLineNumber(prep.document, bodyStart)
+                endLine = MemberEditingUtils.safeLineNumber(prep.document, bodyStart + content.length)
             }
-            startLine = MemberEditingUtils.safeLineNumber(prep.document, bodyStart)
-            endLine = MemberEditingUtils.safeLineNumber(prep.document, bodyStart + content.length)
-        }
 
-        if (error != null) {
-            return createErrorResult(error!!)
-        }
+            if (error != null) {
+                return createErrorResult(error!!)
+            }
 
-        edtAction { MemberEditingUtils.saveToDisk() }
+            edtAction { MemberEditingUtils.saveToDisk() }
 
-        return createJsonResult(
-            MemberEditResult(
-                success = true,
-                file = prep.relativePath,
-                message = "Replaced body of ${member.kind} '${member.name}'",
-                startLine = startLine,
-                endLine = endLine
+            updatedSymbol = suspendingReadAction {
+                pointer.element?.let { resolvedSymbolInfo(project, it, requestedSymbolId) }
+            }
+
+            return createJsonResult(
+                MemberEditResult(
+                    success = true,
+                    file = prep.relativePath,
+                    message = "Replaced body of ${member.kind} '${member.name}'" + if (updatedSymbol == null) {
+                        ". The symbol handle could not be restored; rediscover the edited declaration before another refactoring."
+                    } else "",
+                    startLine = startLine,
+                    endLine = endLine,
+                    updatedSymbol = updatedSymbol
+                )
             )
-        )
+        } finally {
+            // Once the edit is visible, a failed rebind must not leave the caller's handle free
+            // to resolve through a stale smart pointer or to a different PSI declaration.
+            if (editApplied && updatedSymbol == null && requestedSymbolId != null) {
+                SymbolIdRegistry.getInstance().invalidate(requestedSymbolId)
+            }
+        }
     }
 
     private fun handleError(error: Throwable, memberName: String): CallToolResult {

@@ -7,7 +7,6 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobMatcher
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.createFilteredScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.SearchTextResult
@@ -177,7 +176,7 @@ class SearchTextTool : AbstractMcpTool() {
             seenKeys = serializedResults.map { it.key }.toSet(),
             searchExtender = searchExtender,
             psiModCount = PsiModificationTracker.getInstance(project).modificationCount,
-            projectBasePath = ProjectResolver.normalizePath(project.basePath ?: ""),
+            project = project,
             metadata = buildMap {
                 put("query", query)
                 put("regex", regex.toString())

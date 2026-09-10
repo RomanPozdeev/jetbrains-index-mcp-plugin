@@ -315,12 +315,14 @@ Finds all references to a symbol across the entire project using IntelliJ's sema
 - Understanding code dependencies
 - Preparing for refactoring
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target for a fresh search (mutually exclusive):** top-level `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`; this tool also accepts the equivalent nested `target`. Pagination requests pass `cursor` instead.
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | Conditional | Exactly one of `symbolId`, `position` (`file`, `line`, `column`), or `qualifiedName` + `language`. Do not combine with top-level selectors. |
+| `symbolId` | string | Conditional | Opaque ID returned by a previous semantic result. Omit all other target selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -394,7 +396,18 @@ Finds all references to a symbol across the entire project using IntelliJ's sema
   "totalCollected": 2,
   "offset": 0,
   "pageSize": 100,
-  "stale": false
+  "stale": false,
+  "resolvedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "kind": "method",
+    "container": "com.example.UserService",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "qualifiedName": "com.example.UserService#findUser(java.lang.String)",
+    "language": "Java"
+  }
 }
 ```
 
@@ -621,6 +634,7 @@ Searches for classes and interfaces by name using the IDE's class index.
 {
   "classes": [
     {
+      "symbolId": "sym_user-service",
       "name": "UserService",
       "qualifiedName": "com.example.service.UserService",
       "kind": "INTERFACE",
@@ -1635,6 +1649,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
 {
   "symbols": [
     {
+      "symbolId": "sym_user-service",
       "name": "UserService",
       "qualifiedName": "com.example.service.UserService",
       "kind": "INTERFACE",
@@ -1644,6 +1659,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
       "containerName": null
     },
     {
+      "symbolId": "sym_user-service-impl",
       "name": "UserServiceImpl",
       "qualifiedName": "com.example.service.UserServiceImpl",
       "kind": "CLASS",
@@ -1653,6 +1669,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
       "containerName": null
     },
     {
+      "symbolId": "sym_find-user",
       "name": "findUser",
       "qualifiedName": "com.example.service.UserService.findUser",
       "kind": "METHOD",
@@ -1675,6 +1692,7 @@ Searches for code symbols (classes, interfaces, methods, fields, and functions) 
 - `INTERFACE` - Interface
 - `ENUM` - Enum type
 - `ANNOTATION` - Annotation type
+- `OBJECT` - Kotlin object declaration
 - `RECORD` - Record class (Java 16+)
 - `METHOD` - Method
 - `FIELD` - Field or constant
@@ -2342,6 +2360,12 @@ When `replacePattern` is omitted, the tool performs search-only and returns matc
 
 Replace an entire member declaration (signature + body) with new content. The tool locates the member by name, optional parameter count, and optional line number, then replaces the complete declaration.
 
+Replacement must contain one syntactically valid declaration of the original category, optionally
+surrounded by comments. Names/signatures may change, and nested declarations are allowed. Invalid
+or ambiguous content is rejected before editing; use `ide_refactor_safe_delete` for deletion.
+`updatedSymbol` identifies only the exact replacement, never its containing class. If the handle
+cannot be restored after an applied edit, it is invalidated and the response asks for rediscovery.
+
 **Languages:** Java, Kotlin.
 
 **Use when:**
@@ -2353,9 +2377,13 @@ Replace an entire member declaration (signature + body) with new content. The to
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file relative to project root |
+| `target` | object | Conditional | Exactly one nested selector: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Do not combine it with `symbolId`, `language`+`symbol`, `file`, `class`, `member`, `parameterCount`, or `line`. |
+| `symbolId` | string | Conditional | Exact member handle. Omit `file`, `class`, `member`, `parameterCount`, and `line`. |
+| `language` | string | Conditional | Legacy semantic lookup language; provide together with `symbol` and omit all other selectors. |
+| `symbol` | string | Conditional | Legacy qualified member name; provide together with `language` and omit all other selectors. |
+| `file` | string | Conditional | Relative file path. Required only for the legacy file + member selector. |
 | `class` | string | No | Class name to scope the search (required for inner classes or when the member name is ambiguous) |
-| `member` | string | Yes | Name of the member to replace |
+| `member` | string | Conditional | Name of the member to replace. Required only for the legacy file + member selector. |
 | `parameterCount` | integer | No | Number of parameters to disambiguate overloaded methods |
 | `line` | integer | No | 1-based line number to disambiguate when multiple members share the same name |
 | `content` | string | Yes | The full replacement declaration (signature + body) |
@@ -2386,7 +2414,15 @@ Replace an entire member declaration (signature + body) with new content. The to
   "file": "src/main/java/com/example/UserService.java",
   "message": "Replaced method 'findUser' entirely",
   "startLine": 15,
-  "endLine": 18
+  "endLine": 18,
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 
@@ -2727,9 +2763,13 @@ Replace only the body of a method or the initializer of a field, preserving the 
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Path to the file relative to project root |
+| `target` | object | Conditional | Exactly one nested selector: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Do not combine it with `symbolId`, `language`+`symbol`, `file`, `class`, `member`, `parameterCount`, or `line`. |
+| `symbolId` | string | Conditional | Exact member handle. Omit `file`, `class`, `member`, `parameterCount`, and `line`. |
+| `language` | string | Conditional | Legacy semantic lookup language; provide together with `symbol` and omit all other selectors. |
+| `symbol` | string | Conditional | Legacy qualified member name; provide together with `language` and omit all other selectors. |
+| `file` | string | Conditional | Relative file path. Required only for the legacy file + member selector. |
 | `class` | string | No | Class name to scope the search (required for inner classes or when the member name is ambiguous) |
-| `member` | string | Yes | Name of the member whose body/initializer to replace |
+| `member` | string | Conditional | Name of the member whose body/initializer to replace. Required only for the legacy file + member selector. |
 | `parameterCount` | integer | No | Number of parameters to disambiguate overloaded methods |
 | `line` | integer | No | 1-based line number to disambiguate when multiple members share the same name |
 | `content` | string | Yes | The new method body (without braces) or field initializer (without `=` sign) |
@@ -2760,7 +2800,15 @@ Replace only the body of a method or the initializer of a field, preserving the 
   "file": "src/main/java/com/example/UserService.java",
   "message": "Replaced body of method 'findUser'",
   "startLine": 16,
-  "endLine": 18
+  "endLine": 18,
+  "updatedSymbol": {
+    "symbolId": "sym_opaque-handle",
+    "name": "findUser",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 15,
+    "column": 17,
+    "language": "Java"
+  }
 }
 ```
 
@@ -2997,12 +3045,14 @@ Finds all concrete implementations of an interface, abstract class, or abstract 
 - Finding classes that extend an abstract class
 - Finding all overriding methods for polymorphic behavior analysis
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target for a fresh search (mutually exclusive):** top-level `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`; this tool also accepts the equivalent nested `target`. Pagination requests pass `cursor` instead.
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | Conditional | Exactly one of `symbolId`, `position` (`file`, `line`, `column`), or `qualifiedName` + `language`. Do not combine with top-level selectors. |
+| `symbolId` | string | Conditional | Exact type/method handle. Omit coordinates and name selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -3051,6 +3101,7 @@ Finds all concrete implementations of an interface, abstract class, or abstract 
 {
   "implementations": [
     {
+      "symbolId": "sym-jpa-user-repository",
       "name": "com.example.JpaUserRepository",
       "file": "src/main/java/com/example/JpaUserRepository.java",
       "line": 12,
@@ -3058,6 +3109,7 @@ Finds all concrete implementations of an interface, abstract class, or abstract 
       "kind": "CLASS"
     },
     {
+      "symbolId": "sym-in-memory-user-repository",
       "name": "com.example.InMemoryUserRepository",
       "file": "src/main/java/com/example/InMemoryUserRepository.java",
       "line": 8,
@@ -3091,12 +3143,14 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
 
 **Position flexibility:** The position (line/column) can be anywhere within the method - on the name, inside the body, or on the @Override annotation. The tool automatically finds the enclosing method.
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** top-level `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`; this tool also accepts the equivalent nested `target`.
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | Conditional | Exactly one of `symbolId`, `position` (`file`, `line`, `column`), or `qualifiedName` + `language`. Do not combine with top-level selectors. |
+| `symbolId` | string | Conditional | Exact method handle. Omit coordinates and name selectors. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number (any line within the method). Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number (any position within the method). Required for position-based lookup. |
@@ -3139,6 +3193,7 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
 ```json
 {
   "method": {
+    "symbolId": "sym-find-user-impl",
     "name": "findUser",
     "signature": "findUser(String id): User",
     "containingClass": "com.example.UserServiceImpl",
@@ -3148,6 +3203,7 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
   },
   "hierarchy": [
     {
+      "symbolId": "sym-find-user-base",
       "name": "findUser",
       "signature": "findUser(String id): User",
       "containingClass": "com.example.AbstractUserService",
@@ -3159,6 +3215,7 @@ Finds the complete inheritance hierarchy for a method - all parent methods it ov
       "depth": 1
     },
     {
+      "symbolId": "sym-find-user-interface",
       "name": "findUser",
       "signature": "findUser(String id): User",
       "containingClass": "com.example.UserService",

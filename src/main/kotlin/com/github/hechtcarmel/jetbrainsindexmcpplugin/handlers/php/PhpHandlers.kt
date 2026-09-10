@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.php
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.rethrowIfControlFlow
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.toArgumentFailure
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.*
@@ -1434,7 +1435,8 @@ class PhpImplementationsHandler : BasePhpHandler<List<ImplementationData>>(), Im
                             line = getLineNumber(project, overridingMethod) ?: 0,
                             column = getColumnNumber(project, overridingMethod) ?: 0,
                             kind = "METHOD",
-                            language = "PHP"
+                            language = "PHP",
+                            pointerTarget = overridingMethod
                         ))
                     }
                 }
@@ -1443,6 +1445,7 @@ class PhpImplementationsHandler : BasePhpHandler<List<ImplementationData>>(), Im
             LOG.debug("Found ${results.size} method implementations for $methodName in $classFqn using PhpIndex")
             results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Error finding method implementations: ${e.message}")
             emptyList()
         }
@@ -1472,7 +1475,8 @@ class PhpImplementationsHandler : BasePhpHandler<List<ImplementationData>>(), Im
                         line = getLineNumber(project, subclass) ?: 0,
                         column = getColumnNumber(project, subclass) ?: 0,
                         kind = determineClassKind(subclass),
-                        language = "PHP"
+                        language = "PHP",
+                        pointerTarget = subclass
                     ))
                 }
             }
@@ -1480,6 +1484,7 @@ class PhpImplementationsHandler : BasePhpHandler<List<ImplementationData>>(), Im
             LOG.debug("Found ${results.size} implementations for $fqn using PhpIndex")
             results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Error finding class implementations: ${e.message}")
             emptyList()
         }
@@ -1788,7 +1793,8 @@ class PhpSuperMethodsHandler : BasePhpHandler<SuperMethodsData>(), SuperMethodsH
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, method) ?: 0,
             column = getColumnNumber(project, method) ?: 0,
-            language = "PHP"
+            language = "PHP",
+            pointerTarget = method
         )
 
         val hierarchy = buildHierarchy(project, method)
@@ -1837,7 +1843,8 @@ class PhpSuperMethodsHandler : BasePhpHandler<SuperMethodsData>(), SuperMethodsH
                             column = getColumnNumber(project, superMethod),
                             isInterface = isInterface(declaringClass),
                             depth = depth,
-                            language = "PHP"
+                            language = "PHP",
+                            pointerTarget = superMethod
                         ))
 
                         hierarchy.addAll(buildHierarchy(project, superMethod, visited, depth + 1))
@@ -1870,7 +1877,8 @@ class PhpSuperMethodsHandler : BasePhpHandler<SuperMethodsData>(), SuperMethodsH
                             column = getColumnNumber(project, ifaceMethod),
                             isInterface = true,
                             depth = depth,
-                            language = "PHP"
+                            language = "PHP",
+                            pointerTarget = ifaceMethod
                         ))
 
                         // Interfaces can extend other interfaces
@@ -1879,6 +1887,7 @@ class PhpSuperMethodsHandler : BasePhpHandler<SuperMethodsData>(), SuperMethodsH
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error building hierarchy: ${e.message}")
         }
 
@@ -1904,10 +1913,14 @@ class PhpSuperMethodsHandler : BasePhpHandler<SuperMethodsData>(), SuperMethodsH
                             val toStringMethod = typeElement.javaClass.getMethod("toString")
                             toStringMethod.invoke(typeElement) as? String
                         } else null
-                    } catch (e: Exception) { null }
+                    } catch (e: Exception) {
+                        e.rethrowIfControlFlow()
+                        null
+                    }
 
                     if (type != null) "$type \$$name" else "\$$name"
                 } catch (e: Exception) {
+                    e.rethrowIfControlFlow()
                     null
                 }
             }.joinToString(", ")
@@ -1915,6 +1928,7 @@ class PhpSuperMethodsHandler : BasePhpHandler<SuperMethodsData>(), SuperMethodsH
             val methodName = getName(method) ?: "unknown"
             "$methodName($params)"
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             getName(method) ?: "unknown"
         }
     }

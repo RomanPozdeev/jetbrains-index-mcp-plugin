@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit
 /** Releases idle/closed-project payloads even when nobody calls the owning cache again. */
 internal class CacheMaintenance(
     owner: Disposable,
-    sweep: () -> Unit,
+    sweep: (() -> Unit)?,
     removeProject: (Project) -> Unit
 ) : Disposable {
     private val connection = ApplicationManager.getApplication()?.messageBus?.connect(owner)?.also { connection ->
@@ -19,9 +19,9 @@ internal class CacheMaintenance(
             override fun projectClosed(project: Project) = removeProject(project)
         })
     }
-    private val future = if (connection == null) null else {
+    private val future = if (connection == null) null else sweep?.let { sweepAction ->
         AppExecutorUtil.getAppScheduledExecutorService().scheduleWithFixedDelay(
-            { sweep() },
+            { sweepAction() },
             PaginationService.SWEEP_INTERVAL_MINUTES,
             PaginationService.SWEEP_INTERVAL_MINUTES,
             TimeUnit.MINUTES
@@ -45,6 +45,8 @@ internal data class CacheStats(
     val misses: Long,
     val insertions: Long,
     val evictions: Map<CacheEvictionReason, Long>,
+    val storedPointers: Long = 0,
+    val storedResults: Long = 0,
     val maintenanceScans: Long = 0
 )
 
@@ -60,7 +62,11 @@ internal class CacheCounters {
         if (count > 0) evictions[reason] = (evictions[reason] ?: 0L) + count
     }
 
-    fun snapshot(entries: Int) = CacheStats(
-        entries, hits, misses, insertions, evictions.toMap(), maintenanceScans
+    fun snapshot(
+        entries: Int,
+        pointers: Long = 0,
+        results: Long = 0
+    ) = CacheStats(
+        entries, hits, misses, insertions, evictions.toMap(), pointers, results, maintenanceScans
     )
 }

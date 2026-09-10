@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.go
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.rethrowIfControlFlow
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.*
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PluginDetectors
@@ -645,7 +646,8 @@ class GoImplementationsHandler : BaseGoHandler<List<ImplementationData>>(), Impl
                             line = getLineNumber(project, definition) ?: 0,
                             column = getColumnNumber(project, definition) ?: 0,
                             kind = kind,
-                            language = "Go"
+                            language = "Go",
+                            pointerTarget = definition
                         ))
                     }
                 }
@@ -655,6 +657,7 @@ class GoImplementationsHandler : BaseGoHandler<List<ImplementationData>>(), Impl
             LOG.debug("Found ${results.size} method implementations")
             return results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error finding method implementations: ${e.message}")
             return emptyList()
         }
@@ -679,7 +682,8 @@ class GoImplementationsHandler : BaseGoHandler<List<ImplementationData>>(), Impl
                             line = getLineNumber(project, definition) ?: 0,
                             column = getColumnNumber(project, definition) ?: 0,
                             kind = determineTypeKind(definition),
-                            language = "Go"
+                            language = "Go",
+                            pointerTarget = definition
                         ))
                     }
                 }
@@ -689,6 +693,7 @@ class GoImplementationsHandler : BaseGoHandler<List<ImplementationData>>(), Impl
             LOG.debug("Found ${results.size} interface implementations")
             return results
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error finding interface implementations: ${e.message}")
             return emptyList()
         }
@@ -933,7 +938,8 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, goFunction) ?: 0,
             column = getColumnNumber(project, goFunction) ?: 0,
-            language = "Go"
+            language = "Go",
+            pointerTarget = goFunction
         )
 
         val hierarchy = buildHierarchy(project, goFunction)
@@ -967,6 +973,8 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
             hierarchy.addAll(findSatisfiedInterfaceMethods(project, receiverType, methodName, visited, depth))
 
         } catch (e: Exception) {
+
+            e.rethrowIfControlFlow()
             LOG.debug("Error building hierarchy: ${e.message}")
         }
 
@@ -1013,7 +1021,8 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
                                         column = getColumnNumber(project, embeddedMethod),
                                         isInterface = false,
                                         depth = depth,
-                                        language = "Go"
+                                        language = "Go",
+                                        pointerTarget = embeddedMethod
                                     ))
 
                                     // Recursively find in embedded types of the embedded type
@@ -1023,10 +1032,12 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
                         }
                     }
                 } catch (e: Exception) {
+                    e.rethrowIfControlFlow()
                     // Field might not have anonymous field definition
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error finding methods from embedded types: ${e.message}")
         }
 
@@ -1061,6 +1072,7 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
             // Resolve the type reference
             resolveType(typeElement)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -1071,6 +1083,7 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
             val reference = referenceMethod.invoke(element) as? com.intellij.psi.PsiReference
             reference?.resolve()
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             // Try to find GoTypeSpec in ancestors
             findContainingGoType(element)
         }
@@ -1090,6 +1103,7 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
                 getName(method) == methodName && getReceiverTypeName(method) == typeName
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             return null
         }
     }
@@ -1103,6 +1117,7 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
             val typeElement = getTypeMethod.invoke(receiver) as? PsiElement
             typeElement?.text?.trim('*', ' ')
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }
@@ -1120,6 +1135,7 @@ class GoSuperMethodsHandler : BaseGoHandler<SuperMethodsData>(), SuperMethodsHan
                 getName(goFunction) ?: "unknown"
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             getName(goFunction) ?: "unknown"
         }
     }

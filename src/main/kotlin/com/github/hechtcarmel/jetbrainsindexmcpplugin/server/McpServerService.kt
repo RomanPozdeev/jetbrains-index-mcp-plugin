@@ -50,6 +50,8 @@ class McpServerService(
     private val legacySseTransports: LegacySseTransports = LegacySseTransports()
     private val serverEpoch: McpServerEpoch = McpServerEpoch.shared
     private val symbolIdRegistry: SymbolIdRegistry = SymbolIdRegistry.getInstance()
+    private val paginationService: PaginationService =
+        ApplicationManager.getApplication().getService(PaginationService::class.java)
 
 
     // Written under the instance monitor (startServer/stopServer), read lock-free from
@@ -238,6 +240,7 @@ class McpServerService(
         ktorServer = null
         serverEpoch.advanceAndReset {
             symbolIdRegistry.clearForSessionReset()
+            paginationService.clearForSessionReset()
         }
     }
 

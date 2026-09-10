@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.javascript
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.rethrowIfControlFlow
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.toArgumentFailure
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.*
@@ -1364,6 +1365,7 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                 return result
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("JSFunctionOverridingSearch failed: ${e.message}")
         }
 
@@ -1375,6 +1377,7 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                 return result
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("DefinitionsScopedSearch failed: ${e.message}")
         }
 
@@ -1406,7 +1409,8 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                         line = getLineNumber(project, overridingMethod) ?: 0,
                         column = getColumnNumber(project, overridingMethod) ?: 0,
                         kind = "METHOD",
-                        language = getLanguageName(overridingMethod)
+                        language = getLanguageName(overridingMethod),
+                        pointerTarget = overridingMethod
                     ))
                 }
             }
@@ -1429,6 +1433,7 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                 return result
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("JSInheritorsSearch failed: ${e.message}")
         }
 
@@ -1440,6 +1445,7 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                 return result
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("DefinitionsScopedSearch failed: ${e.message}")
         }
 
@@ -1468,7 +1474,8 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                         line = getLineNumber(project, inheritor) ?: 0,
                         column = getColumnNumber(project, inheritor) ?: 0,
                         kind = getClassKind(inheritor),
-                        language = getLanguageName(inheritor)
+                        language = getLanguageName(inheritor),
+                        pointerTarget = inheritor
                     ))
                 }
             }
@@ -1500,7 +1507,8 @@ class JavaScriptImplementationsHandler : BaseJavaScriptHandler<List<Implementati
                         line = getLineNumber(project, definition) ?: 0,
                         column = getColumnNumber(project, definition) ?: 0,
                         kind = kind,
-                        language = getLanguageName(definition)
+                        language = getLanguageName(definition),
+                        pointerTarget = definition
                     ))
                 }
             }
@@ -2158,7 +2166,8 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
             file = file?.let { getRelativePath(project, it) } ?: "unknown",
             line = getLineNumber(project, jsFunction) ?: 0,
             column = getColumnNumber(project, jsFunction) ?: 0,
-            language = getLanguageName(jsFunction)
+            language = getLanguageName(jsFunction),
+            pointerTarget = jsFunction
         )
 
         val hierarchy = buildHierarchy(project, jsFunction)
@@ -2204,7 +2213,8 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
                         column = getColumnNumber(project, superMethod),
                         isInterface = getClassKind(superClass) == "INTERFACE",
                         depth = depth,
-                        language = getLanguageName(superMethod)
+                        language = getLanguageName(superMethod),
+                        pointerTarget = superMethod
                     ))
 
                     hierarchy.addAll(buildHierarchy(project, superMethod, visited, depth + 1))
@@ -2233,11 +2243,13 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
                         column = getColumnNumber(project, superMethod),
                         isInterface = true,
                         depth = depth,
-                        language = getLanguageName(superMethod)
+                        language = getLanguageName(superMethod),
+                        pointerTarget = superMethod
                     ))
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.debug("Error building hierarchy: ${e.message}")
         }
 
@@ -2260,12 +2272,14 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
                         val getTypeMethod = param.javaClass.getMethod("getType")
                         val typeElement = getTypeMethod.invoke(param)
                         typeElement?.toString()
-                    } catch (_: Exception) {
+                    } catch (failure: Exception) {
+                        failure.rethrowIfControlFlow()
                         null
                     }
 
                     if (type != null) "$name: $type" else name
-                } catch (_: Exception) {
+                } catch (failure: Exception) {
+                    failure.rethrowIfControlFlow()
                     null
                 }
             }.joinToString(", ")
@@ -2276,7 +2290,8 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
                 val getReturnTypeMethod = jsFunction.javaClass.getMethod("getReturnType")
                 val returnTypeElement = getReturnTypeMethod.invoke(jsFunction)
                 returnTypeElement?.toString()
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                failure.rethrowIfControlFlow()
                 null
             }
 
@@ -2285,7 +2300,8 @@ class JavaScriptSuperMethodsHandler : BaseJavaScriptHandler<SuperMethodsData>(),
             } else {
                 "$functionName($params)"
             }
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             getName(jsFunction) ?: "unknown"
         }
     }

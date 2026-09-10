@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extend stable symbol handles to search results and member edits; preserve stale search pages across PSI edits, exact declaration identity, and Kotlin class kinds. Trim shared schema descriptions and enforce a tools/list size budget. Preserve parameter handles during super-method lookup, serve the final cached stale page, and normalize Kotlin light targets before member edits. Preserve namespace-qualified TypeScript names in class and symbol search results.
+
+### Fixed
+
+- **Kotlin symbol-info fallback reports the declaration** — when Quick Documentation provides no signature, `ide_symbol_info` selects the source line containing the PSI name identifier, so leading annotations and KDoc no longer replace the method declaration. Braces inside inline annotations or quoted names no longer truncate it.
+- Discover newly created external files before member-edit PSI reads, including position targets, when automatic external-change synchronization is disabled.
+- Keep cached search handles and reference metadata bound to their original file identity after deletion and recreation.
+- Preserve exact Kotlin accessor handles through reference and super-method searches, including cached response materialization.
+- Reject synthetic JVM getter/setter targets that would edit an enclosing Kotlin property instead of the selected method.
+
 ## [5.14.0] - 2026-09-15
 
 ### Added

@@ -80,6 +80,14 @@ class JavaMemberResolver(private val project: Project) : MemberResolver {
         return results
     }
 
+    override fun resolveMember(element: PsiElement): ResolvedMember? = when (element) {
+        is PsiMethod -> resolveMethod(element)
+        is PsiField -> resolveField(element)
+        is PsiClass -> resolveClass(element)
+        is PsiClassInitializer -> resolveInitializer(element)
+        else -> null
+    }
+
     override fun getInsertionOffset(scope: PsiElement, position: String, anchor: ResolvedMember?): Int? {
         if (scope !is PsiClass) return null
 

@@ -186,6 +186,8 @@
   language: string? (optional)
   line: number
   name: string
+  qualifiedName: string? (optional)
+  symbolId: string? (optional)
 
 ## ImplementationResult
   hasMore: boolean (optional)
@@ -235,6 +237,7 @@
   message: string
   startLine: number? (optional)
   success: boolean
+  updatedSymbol: object? (optional)
 
 ## MemberErrorResult
   candidates: array? (optional)
@@ -250,6 +253,7 @@
   line: number
   name: string
   signature: string
+  symbolId: string? (optional)
 
 ## NoSymbolFoundResult
   error: string
@@ -357,7 +361,7 @@
   line: number?
   name: string?
   qualifiedName: string? (optional)
-  symbolId: string? (optional)
+  symbolId: string
 
 ## RunTestsInProgressResult
   configName: string
@@ -462,6 +466,7 @@
   line: number?
   name: string
   signature: string
+  symbolId: string? (optional)
 
 ## SuperMethodsResult
   hierarchy: array
@@ -504,6 +509,7 @@
   line: number
   name: string
   qualifiedName: string?
+  symbolId: string
 
 ## SymbolParameterInfo
   name: string?
