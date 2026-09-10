@@ -31,6 +31,7 @@ import org.jetbrains.annotations.VisibleForTesting
 import java.awt.FlowLayout
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
+import java.net.IDN
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -42,7 +43,11 @@ import javax.swing.JSpinner
 import javax.swing.SpinnerNumberModel
 import javax.swing.event.DocumentEvent
 
-class McpSettingsConfigurable : Configurable {
+class McpSettingsConfigurable internal constructor(
+    private val restartServer: (String, Int) -> Unit
+) : Configurable {
+
+    constructor() : this(::restartServerAsync)
 
     private var panel: JPanel? = null
     private var serverHostField: JBTextField? = null
@@ -310,8 +315,9 @@ class McpSettingsConfigurable : Configurable {
 
     override fun isModified(): Boolean {
         val settings = McpSettings.getInstance()
+        val normalizedHost = serverHostField?.text?.let { normalizeBindHostForSettings(it, settings.serverHost) }
 
-        if (serverHostField?.text?.trim() != settings.serverHost ||
+        if (normalizedHost != settings.serverHost ||
             serverPortSpinner?.value != settings.serverPort ||
             maxHistorySizeSpinner?.value != settings.maxHistorySize ||
             syncExternalChangesCheckBox?.isSelected != settings.syncExternalChanges ||
@@ -335,15 +341,21 @@ class McpSettingsConfigurable : Configurable {
         val settings = McpSettings.getInstance()
         val oldHost = settings.serverHost
         val oldPort = settings.serverPort
-        val newHost = serverHostField?.text?.trim() ?: McpConstants.DEFAULT_SERVER_HOST
+        val hostInput = serverHostField?.text?.trim() ?: McpConstants.DEFAULT_SERVER_HOST
         val newPort = serverPortSpinner?.value as? Int ?: McpConstants.getDefaultServerPort()
 
-        if (newHost.isEmpty()) {
+        if (hostInput.isEmpty()) {
             throw ConfigurationException(
                 McpBundle.message("settings.serverHost.empty"),
                 McpBundle.message("settings.validation.host.title")
             )
         }
+        // Persist and bind the same representation that DNS validation resolves. In
+        // particular, JVM socket APIs do not perform IDN conversion on Unicode hostnames.
+        val newHost = normalizeBindHostForSettings(hostInput, oldHost) ?: throw ConfigurationException(
+            McpBundle.message("settings.serverHost.invalid", hostInput),
+            McpBundle.message("settings.validation.host.title")
+        )
 
         // The async validation only runs on focus loss, which never happens when the user
         // confirms the dialog from the keyboard while the host field still has focus. Instead
@@ -351,7 +363,7 @@ class McpSettingsConfigurable : Configurable {
         if (isHostValidationPending) {
             if (!isValidHost(newHost)) {
                 throw ConfigurationException(
-                    McpBundle.message("settings.serverHost.invalid", newHost),
+                    McpBundle.message("settings.serverHost.invalid", hostInput),
                     McpBundle.message("settings.validation.host.title")
                 )
             }
@@ -361,7 +373,7 @@ class McpSettingsConfigurable : Configurable {
 
         if (lastHostValidation != null) {
             throw ConfigurationException(
-                McpBundle.message("settings.serverHost.invalid", newHost),
+                McpBundle.message("settings.serverHost.invalid", hostInput),
                 McpBundle.message("settings.validation.host.title")
             )
         }
@@ -395,51 +407,8 @@ class McpSettingsConfigurable : Configurable {
         settings.lifecycleLogToFile = lifecycleLogToFileCheckBox?.isSelected ?: false
         settings.minimumOpenProjects = minimumOpenProjectsSpinner?.value as? Int ?: 4
 
-        // Auto-restart server if host/port changed. Must run on a pooled thread:
-        // EmbeddedServer.stop() blocks (runBlocking) while in-flight MCP calls drain — calls
-        // that may themselves be waiting for the EDT — and the CIO bind is blocking too, so
-        // restarting on the EDT freezes the UI and can only be unblocked by Ktor's force-cancel
-        // timeout. Only the result notification goes back to the EDT.
         if (newHost != oldHost || newPort != oldPort) {
-            ApplicationManager.getApplication().executeOnPooledThread {
-                val mcpService = McpServerService.getInstance()
-                if (!mcpService.isInitialized) return@executeOnPooledThread
-                val result = mcpService.restartServer(newHost, newPort)
-                ApplicationManager.getApplication().invokeLater({
-                    when (result) {
-                        is KtorMcpServer.StartResult.Success -> {
-                            NotificationGroupManager.getInstance()
-                                .getNotificationGroup(McpConstants.NOTIFICATION_GROUP_ID)
-                                .createNotification(
-                                    McpBundle.message("notification.serverRestarted.title"),
-                                    McpBundle.message("notification.serverRestarted", "$newHost:$newPort"),
-                                    NotificationType.INFORMATION
-                                )
-                                .notify(null)
-                        }
-                        is KtorMcpServer.StartResult.PortInUse -> {
-                            NotificationGroupManager.getInstance()
-                                .getNotificationGroup(McpConstants.NOTIFICATION_GROUP_ID)
-                                .createNotification(
-                                    McpBundle.message("notification.serverStartFailed.title"),
-                                    McpBundle.message("notification.serverPortInUse.content", result.port, newHost),
-                                    NotificationType.ERROR
-                                )
-                                .notify(null)
-                        }
-                        is KtorMcpServer.StartResult.Error -> {
-                            NotificationGroupManager.getInstance()
-                                .getNotificationGroup(McpConstants.NOTIFICATION_GROUP_ID)
-                                .createNotification(
-                                    McpBundle.message("notification.serverStartFailed.title"),
-                                    McpBundle.message("notification.serverStartFailed.content", result.message),
-                                    NotificationType.ERROR
-                                )
-                                .notify(null)
-                        }
-                    }
-                }, ModalityState.any())
-            }
+            restartServer(newHost, newPort)
         }
     }
 
@@ -605,7 +574,53 @@ class McpSettingsConfigurable : Configurable {
         }
 
     companion object {
+        private fun restartServerAsync(newHost: String, newPort: Int) {
+            // EmbeddedServer.stop() blocks while in-flight MCP calls drain — calls that may
+            // themselves be waiting for the EDT — and the CIO bind is blocking too. Keep
+            // the restart on a pooled thread; only the result notification goes to the EDT.
+            ApplicationManager.getApplication().executeOnPooledThread {
+                val mcpService = McpServerService.getInstance()
+                if (!mcpService.isInitialized) return@executeOnPooledThread
+                val result = mcpService.restartServer(newHost, newPort)
+                ApplicationManager.getApplication().invokeLater({
+                    when (result) {
+                        is KtorMcpServer.StartResult.Success -> {
+                            NotificationGroupManager.getInstance()
+                                .getNotificationGroup(McpConstants.NOTIFICATION_GROUP_ID)
+                                .createNotification(
+                                    McpBundle.message("notification.serverRestarted.title"),
+                                    McpBundle.message("notification.serverRestarted", "$newHost:$newPort"),
+                                    NotificationType.INFORMATION
+                                )
+                                .notify(null)
+                        }
+                        is KtorMcpServer.StartResult.PortInUse -> {
+                            NotificationGroupManager.getInstance()
+                                .getNotificationGroup(McpConstants.NOTIFICATION_GROUP_ID)
+                                .createNotification(
+                                    McpBundle.message("notification.serverStartFailed.title"),
+                                    McpBundle.message("notification.serverPortInUse.content", result.port, newHost),
+                                    NotificationType.ERROR
+                                )
+                                .notify(null)
+                        }
+                        is KtorMcpServer.StartResult.Error -> {
+                            NotificationGroupManager.getInstance()
+                                .getNotificationGroup(McpConstants.NOTIFICATION_GROUP_ID)
+                                .createNotification(
+                                    McpBundle.message("notification.serverStartFailed.title"),
+                                    McpBundle.message("notification.serverStartFailed.content", result.message),
+                                    NotificationType.ERROR
+                                )
+                                .notify(null)
+                        }
+                    }
+                }, ModalityState.any())
+            }
+        }
+
         private val IPV4_PATTERN = Regex("^[0-9.]+\$")
+        private val HOSTNAME_LABEL_PATTERN = Regex("^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\$")
 
         @VisibleForTesting
         fun isValidIpv4(host: String): Boolean {
@@ -618,17 +633,61 @@ class McpSettingsConfigurable : Configurable {
         }
 
         @VisibleForTesting
-        fun isValidHost(host: String): Boolean {
+        fun isValidHost(host: String): Boolean = isValidHost(host, InetAddress::getByName)
+
+        internal fun isValidHost(host: String, resolveHost: (String) -> InetAddress): Boolean {
+            val bindHost = normalizeBindHost(host) ?: return false
+            if (IPV4_PATTERN.matches(bindHost) || bindHost.contains(':')) return true
+            return runCatching { resolveHost(bindHost) }.isSuccess
+        }
+
+        /**
+         * Preserve an unchanged IPv6 literal when its named interface is temporarily absent.
+         * Parsing a named scope asks the JVM for a live network interface, which can fail after
+         * a VPN disconnect. Hostnames still need IDN normalization, even when already persisted.
+         */
+        private fun normalizeBindHostForSettings(host: String, savedHost: String): String? {
             val trimmedHost = host.trim()
-            if (trimmedHost.isEmpty()) return false
+            return if (trimmedHost == savedHost && ':' in trimmedHost) {
+                trimmedHost
+            } else {
+                normalizeBindHost(trimmedHost)
+            }
+        }
+
+        /** Validates host syntax and returns the representation used by JVM socket APIs. */
+        private fun normalizeBindHost(host: String): String? {
+            val trimmedHost = host.trim()
+            if (trimmedHost.isEmpty()) return null
 
             // Check if input consists only of numbers and dots (potential IPv4)
             if (IPV4_PATTERN.matches(trimmedHost)) {
-                return isValidIpv4(trimmedHost)
+                return trimmedHost.takeIf(::isValidIpv4)
             }
 
-            // Fallback for hostnames
-            return runCatching { InetAddress.getByName(trimmedHost) }.isSuccess
+            // InetAddress delegates to the system resolver, which may be configured with a
+            // wildcard DNS suffix and report even syntactically invalid input as resolvable.
+            // Validate IPv6/hostname syntax first so resolution cannot turn values containing
+            // underscores or URI punctuation into accepted bind addresses.
+            if (trimmedHost.contains(':')) {
+                // IPv4-mapped IPv6 literals legitimately resolve to Inet4Address on the JVM.
+                return runCatching { InetAddress.getByName(trimmedHost) }.getOrNull()?.let { trimmedHost }
+            }
+            val asciiHost = runCatching { IDN.toASCII(trimmedHost.removeSuffix("."), IDN.USE_STD3_ASCII_RULES) }
+                .getOrNull()
+                ?: return null
+            if (asciiHost.isEmpty() || asciiHost.length > 253 ||
+                asciiHost.split('.').any { !HOSTNAME_LABEL_PATTERN.matches(it) }
+            ) {
+                return null
+            }
+
+            val absoluteSuffix = if (trimmedHost.endsWith('.')) "." else ""
+            val bindHost = asciiHost + absoluteSuffix
+            // IDN also maps fullwidth digits and dots; keep strict IPv4 rules after that
+            // conversion instead of accepting JVM shorthand such as 127.1.
+            if (IPV4_PATTERN.matches(bindHost) && !isValidIpv4(bindHost)) return null
+            return bindHost
         }
     }
 }
