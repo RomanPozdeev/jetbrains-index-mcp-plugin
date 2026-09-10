@@ -6,6 +6,7 @@
 
 ### Added
 
+- Definition and symbol-info tools accept an additive nested `target`: exactly one of `symbolId`, `position`, or `qualifiedName` with `language`. Mixed selectors fail validation; existing top-level selectors remain supported. Ignore legacy coordinates accepted as absent before executing a nested target. Ignore target selectors for a cursor only when the selected tool actually supports pagination.
 - `ide_find_definition` and `ide_symbol_info` return and accept opaque `symbolId` handles backed by exact PSI pointers. Handles survive line shifts and rename, expire on deletion/session reset/project close or cache eviction, and route to their owning open project. Cancellation does not expire a handle; pointer restoration does not hold shared cache locks. Preserve exact targets during definition/metadata lookup, expire handles after file replacement, and use source context for synthetic declarations without their own text.
 
 ### Fixed

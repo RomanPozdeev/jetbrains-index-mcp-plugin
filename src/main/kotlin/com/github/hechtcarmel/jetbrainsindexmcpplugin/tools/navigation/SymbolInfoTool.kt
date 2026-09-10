@@ -33,6 +33,8 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 class SymbolInfoTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     companion object {
         private const val DEFAULT_MAX_DOC_LENGTH = 4000
         private const val MAX_ALLOWED_DOC_LENGTH = 20000
@@ -62,6 +64,7 @@ class SymbolInfoTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
         .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
