@@ -125,10 +125,10 @@ When working in a git worktree (e.g., `/project/.claude/worktrees/agent-xyz` or 
 3. `ide_search_text` - substring text search across project (regex via `"regex": true`)
 
 ### "I need to refactor"
-1. Preview a rename with `ide_refactor_rename` and `dryRun: true`; inspect blockers and affected files
+1. Preview a rename or safe delete with `dryRun: true`; inspect blockers and affected files
 2. `ide_refactor_rename` - rename symbol + all references atomically
 3. `ide_move_file` - move file and let the IDE apply semantic updates when that language/backend supports them
-4. `ide_refactor_safe_delete` - delete with usage checking (Java/Kotlin only)
+4. `ide_refactor_safe_delete` - preview/delete an exact symbol target or file with usage checking (Java/Kotlin only)
 5. `ide_replace_text_in_file`, `ide_reformat_code` - apply project code style (disabled by default)
 
 ### "I need to check for problems"

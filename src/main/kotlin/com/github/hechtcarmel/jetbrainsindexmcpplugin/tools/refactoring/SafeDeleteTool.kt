@@ -1,5 +1,7 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.RefactoringResult
@@ -20,14 +22,20 @@ import com.intellij.psi.PsiComment
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
+import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiNamedElement
+import com.intellij.psi.PsiParameter
 import com.intellij.psi.PsiWhiteSpace
+import com.intellij.refactoring.RefactoringFactory
+import com.intellij.psi.search.searches.OverridingMethodsSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.refactoring.rename.RenamePsiElementProcessor
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
@@ -75,7 +83,8 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         Delete a symbol or file safely by first checking for usages. Use when removing code to avoid breaking references.
 
         Modes:
-        - target_type='symbol' (default): Delete the symbol at line/column (REQUIRED: file, line, column).
+        - target_type='symbol' (default): Delete the exact symbol selected by symbolId,
+          language + symbol, or file + line/column. The equivalent nested target is also supported.
           If position is whitespace/comment, returns nearby symbol suggestions.
         - target_type='file': Delete the entire file (REQUIRED: file only).
           Only succeeds if no symbols have external usages. Internal call chains don't block deletion.
@@ -83,9 +92,11 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         Behavior: If usages exist and force=false, returns the usage list instead of deleting.
         Use force=true to delete anyway (may break compilation).
 
-        Returns: success status and affected files, OR blocking usages list, OR nearby symbol suggestions.
+        With dryRun=true, returns the shared non-mutating refactoring preview.
+        Otherwise returns success status and affected files, a blocking usages list, or nearby symbol suggestions.
 
         Examples:
+        - Symbol ID: {"symbolId": "<opaque-id>"}
         - Symbol: {"file": "src/OldClass.java", "line": 10, "column": 14}
         - Symbol with force: {"file": "src/OldClass.java", "line": 10, "column": 14, "force": true}
         - File: {"file": "src/UnusedUtils.java", "target_type": "file"}
@@ -93,9 +104,12 @@ class SafeDeleteTool : AbstractRefactoringTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
-        .file(description = "Path to file relative to project root. REQUIRED.")
-        .intProperty("line", "1-based line number where the symbol is located. REQUIRED when target_type='symbol' (default).")
-        .intProperty("column", "1-based column number. REQUIRED when target_type='symbol' (default).")
+        .target()
+        .symbolId()
+        .languageAndSymbol(required = false)
+        .file(required = false, description = "Path to file relative to project root. Required for file deletion or position-based symbol deletion; omit when symbolId is used.")
+        .intProperty("line", "1-based line number for position-based symbol deletion. Required with file and column.")
+        .intProperty("column", "1-based column number for position-based symbol deletion. Required with file and line.")
         .property("target_type", buildJsonObject {
             put("type", "string")
             putJsonArray("enum") {
@@ -103,13 +117,17 @@ class SafeDeleteTool : AbstractRefactoringTool() {
                 add(JsonPrimitive("file"))
             }
             put("default", "symbol")
-            put("description", "What to delete: 'symbol' (default, requires line+column) or 'file' (deletes entire file if no external usages).")
+            put("description", "What to delete: 'symbol' (default, requires one symbol selector) or 'file' (requires only file and deletes it if no external usages block the operation).")
         })
         .property("force", buildJsonObject {
             put("type", "boolean")
             put("default", false)
             put("description", "Force deletion even if usages exist. Default: false. Use with caution!")
         })
+        .booleanProperty(
+            ParamNames.DRY_RUN,
+            "Resolve the target and check usages without deleting anything. Default: false."
+        )
         .build()
 
     /**
@@ -120,7 +138,9 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         val elementName: String,
         val elementType: String,
         val usages: List<UsageInfo>,
-        val affectedFile: String
+        val affectedFile: String,
+        val symbolId: String? = null,
+        val previewSymbolId: String? = symbolId
     )
 
     /**
@@ -131,7 +151,8 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         val fileName: String,
         val filePath: String,
         val symbols: List<SymbolInfo>,
-        val externalUsages: List<UsageInfo>
+        val externalUsages: List<UsageInfo>,
+        val incompleteDiscoveryReason: String? = null
     )
 
     /**
@@ -146,7 +167,11 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         data class FileNotFound(val file: String) : SymbolPreparationResult()
         data class ReadOnly(val file: String) : SymbolPreparationResult()
         data class PositionOutOfBounds(val line: Int, val column: Int) : SymbolPreparationResult()
-        data class UsageSearchFailed(val reason: String) : SymbolPreparationResult()
+        data class UsageSearchFailed(
+            val reason: String,
+            val partial: SymbolDeletePreparation? = null
+        ) : SymbolPreparationResult()
+        data class InvalidSymbolId(val message: String) : SymbolPreparationResult()
     }
 
     /**
@@ -157,7 +182,10 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         data object FileNotFound : FilePreparationResult()
         data class ReadOnly(val file: String) : FilePreparationResult()
         data class NonPhysicalFile(val fileName: String) : FilePreparationResult()
-        data class UsageSearchFailed(val reason: String) : FilePreparationResult()
+        data class UsageSearchFailed(
+            val reason: String,
+            val partial: FileDeletePreparation? = null
+        ) : FilePreparationResult()
     }
 
     /**
@@ -167,22 +195,58 @@ class SafeDeleteTool : AbstractRefactoringTool() {
     private class UsageSearchException(cause: Exception) : RuntimeException(cause)
 
     override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
-        val file = requiredStringArg(arguments, "file").getOrElse {
-            return createErrorResult(it.message ?: "Missing required parameter: file")
-        }
+        val startedAtNanos = System.nanoTime()
+        val dryRun = arguments[ParamNames.DRY_RUN]?.jsonPrimitive?.booleanOrNull == true
+        val symbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID)
         val targetType = arguments["target_type"]?.jsonPrimitive?.content ?: "symbol"
         val force = arguments["force"]?.jsonPrimitive?.content?.toBoolean() ?: false
 
         requireSmartMode(project)
 
         return when (targetType) {
-            "file" -> executeFileDelete(project, file, force)
+            "file" -> {
+                if (symbolId != null ||
+                    optionalStringArg(arguments, ParamNames.LANGUAGE) != null ||
+                    optionalStringArg(arguments, ParamNames.SYMBOL) != null ||
+                    arguments[ParamNames.LINE]?.let { it != JsonNull } == true ||
+                    arguments[ParamNames.COLUMN]?.let { it != JsonNull } == true
+                ) {
+                    return createErrorResult("target_type='file' accepts only the file path; omit symbol selectors and coordinates")
+                }
+                val file = optionalStringArg(arguments, ParamNames.FILE)
+                    ?: return createErrorResult("Missing required parameter: ${ParamNames.FILE}")
+                executeFileDelete(project, file, force, dryRun, startedAtNanos)
+            }
             "symbol" -> {
-                val line = arguments["line"]?.jsonPrimitive?.int
-                    ?: return createErrorResult("Missing required parameter 'line' for target_type='symbol'")
-                val column = arguments["column"]?.jsonPrimitive?.int
-                    ?: return createErrorResult("Missing required parameter 'column' for target_type='symbol'")
-                executeSymbolDelete(project, file, line, column, force)
+                when (resolveLookupMode(arguments, allowSymbolId = true)) {
+                    LookupModeState.SYMBOL_ID,
+                    LookupModeState.SYMBOL -> executeSymbolDeleteBySemanticTarget(
+                        project,
+                        arguments,
+                        symbolId,
+                        force,
+                        dryRun,
+                        startedAtNanos
+                    )
+                    LookupModeState.POSITION -> {
+                        val file = optionalStringArg(arguments, ParamNames.FILE)
+                            ?: return createErrorResult("Missing required parameter: ${ParamNames.FILE}")
+                        val line = arguments[ParamNames.LINE]?.jsonPrimitive?.int
+                            ?: return createErrorResult("Missing required parameter '${ParamNames.LINE}' for target_type='symbol'")
+                        val column = arguments[ParamNames.COLUMN]?.jsonPrimitive?.int
+                            ?: return createErrorResult("Missing required parameter '${ParamNames.COLUMN}' for target_type='symbol'")
+                        executeSymbolDelete(project, file, line, column, force, dryRun, startedAtNanos)
+                    }
+                    LookupModeState.CONFLICT -> createErrorResult(
+                        if (symbolId != null) {
+                            ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE
+                        } else {
+                            ErrorMessages.LANGUAGE_SYMBOL_AND_OTHER_TARGET_EXCLUSIVE
+                        }
+                    )
+                    LookupModeState.MISSING ->
+                        createErrorResult("Missing required parameter: ${ParamNames.FILE}")
+                }
             }
             else -> createErrorResult("Invalid target_type: '$targetType'. Must be 'symbol' or 'file'.")
         }
@@ -197,18 +261,30 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         file: String,
         line: Int,
         column: Int,
-        force: Boolean
+        force: Boolean,
+        dryRun: Boolean,
+        startedAtNanos: Long
     ): CallToolResult {
         // ═══════════════════════════════════════════════════════════════════════
         // PHASE 1: BACKGROUND - Find element and check usages (suspending read action)
         // ═══════════════════════════════════════════════════════════════════════
         val preparationResult = suspendingReadAction {
-            prepareSymbolDelete(project, file, line, column, force)
+            prepareSymbolDelete(
+                project,
+                file,
+                line,
+                column,
+                force = if (dryRun) false else force,
+                allowReadOnly = dryRun
+            )
         }
 
         return when (preparationResult) {
             is SymbolPreparationResult.Success -> {
                 val preparation = preparationResult.data
+                if (dryRun) {
+                    return createSymbolDeletePreview(project, preparation, force, startedAtNanos)
+                }
                 // If there are usages and force is false, return them without deleting
                 if (preparation.usages.isNotEmpty() && !force) {
                     return createJsonResult(
@@ -254,8 +330,86 @@ class SafeDeleteTool : AbstractRefactoringTool() {
                 createErrorResult("Position out of bounds: line ${preparationResult.line}, column ${preparationResult.column}")
             }
             is SymbolPreparationResult.UsageSearchFailed -> {
-                createErrorResult(usageSearchFailedMessage(preparationResult.reason))
+                if (dryRun && preparationResult.partial != null) {
+                    createSymbolDeletePreview(
+                        project,
+                        preparationResult.partial,
+                        force,
+                        startedAtNanos,
+                        discoveryError = preparationResult.reason
+                    )
+                } else {
+                    createErrorResult(usageSearchFailedMessage(preparationResult.reason))
+                }
             }
+            is SymbolPreparationResult.InvalidSymbolId -> {
+                // This variant is only produced by the symbolId path, but keeping the branch
+                // explicit makes this exhaustive if preparation logic is shared in the future.
+                createErrorResult(preparationResult.message)
+            }
+        }
+    }
+
+    /** Exact semantic target path, with no nearby-symbol suggestions or coordinate fallback. */
+    private suspend fun executeSymbolDeleteBySemanticTarget(
+        project: Project,
+        arguments: JsonObject,
+        symbolId: String?,
+        force: Boolean,
+        dryRun: Boolean,
+        startedAtNanos: Long
+    ): CallToolResult {
+        val preparationResult = suspendingReadAction {
+            prepareSymbolDeleteBySemanticTarget(
+                project,
+                arguments,
+                symbolId,
+                force = if (dryRun) false else force,
+                allowReadOnly = dryRun
+            )
+        }
+
+        return when (preparationResult) {
+            is SymbolPreparationResult.Success -> {
+                val preparation = preparationResult.data
+                if (dryRun) {
+                    return createSymbolDeletePreview(project, preparation, force, startedAtNanos)
+                }
+                if (preparation.usages.isNotEmpty() && !force) {
+                    createJsonResult(
+                        SafeDeleteBlockedResult(
+                            canDelete = false,
+                            elementName = preparation.elementName,
+                            elementType = preparation.elementType,
+                            usageCount = preparation.usages.size,
+                            blockingUsages = preparation.usages.take(20),
+                            message = "Cannot delete '${preparation.elementName}': found ${preparation.usages.size} usage(s). Use force=true to delete anyway."
+                        )
+                    )
+                } else {
+                    beforeDeletionHook?.invoke()
+                    applySymbolDeletion(project, preparation, force)
+                }
+            }
+            is SymbolPreparationResult.InvalidSymbolId -> createErrorResult(preparationResult.message)
+            is SymbolPreparationResult.ReadOnly ->
+                createErrorResult("File is read-only and cannot be modified: ${preparationResult.file}")
+            is SymbolPreparationResult.UsageSearchFailed -> {
+                if (dryRun && preparationResult.partial != null) {
+                    createSymbolDeletePreview(
+                        project,
+                        preparationResult.partial,
+                        force,
+                        startedAtNanos,
+                        discoveryError = preparationResult.reason
+                    )
+                } else {
+                    createErrorResult(usageSearchFailedMessage(preparationResult.reason))
+                }
+            }
+            else -> createErrorResult(
+                symbolId?.let(ErrorMessages::symbolIdExpired) ?: ErrorMessages.COULD_NOT_RESOLVE_SYMBOL
+            )
         }
     }
 
@@ -265,18 +419,28 @@ class SafeDeleteTool : AbstractRefactoringTool() {
     private suspend fun executeFileDelete(
         project: Project,
         file: String,
-        force: Boolean
+        force: Boolean,
+        dryRun: Boolean,
+        startedAtNanos: Long
     ): CallToolResult {
         // ═══════════════════════════════════════════════════════════════════════
         // PHASE 1: BACKGROUND - Collect symbols and find external usages
         // ═══════════════════════════════════════════════════════════════════════
         val preparationResult = suspendingReadAction {
-            prepareFileDelete(project, file, force)
+            prepareFileDelete(
+                project,
+                file,
+                force = if (dryRun) false else force,
+                allowReadOnly = dryRun
+            )
         }
 
         return when (preparationResult) {
             is FilePreparationResult.Success -> {
                 val preparation = preparationResult.data
+                if (dryRun) {
+                    return createFileDeletePreview(project, preparation, force, startedAtNanos)
+                }
                 // If there are external usages and force is false, return them
                 if (preparation.externalUsages.isNotEmpty() && !force) {
                     return createJsonResult(
@@ -308,7 +472,17 @@ class SafeDeleteTool : AbstractRefactoringTool() {
                 createErrorResult("Cannot delete non-physical file '${preparationResult.fileName}' (e.g., in-memory or generated file)")
             }
             is FilePreparationResult.UsageSearchFailed -> {
-                createErrorResult(usageSearchFailedMessage(preparationResult.reason))
+                if (dryRun && preparationResult.partial != null) {
+                    createFileDeletePreview(
+                        project,
+                        preparationResult.partial,
+                        force,
+                        startedAtNanos,
+                        discoveryError = preparationResult.reason
+                    )
+                } else {
+                    createErrorResult(usageSearchFailedMessage(preparationResult.reason))
+                }
             }
         }
     }
@@ -316,6 +490,114 @@ class SafeDeleteTool : AbstractRefactoringTool() {
     private fun usageSearchFailedMessage(reason: String): String =
         "Usage search failed ($reason) — refusing to delete without a complete usage check. " +
             "Retry, or use force=true to delete anyway."
+
+    private suspend fun createSymbolDeletePreview(
+        project: Project,
+        preparation: SymbolDeletePreparation,
+        force: Boolean,
+        startedAtNanos: Long,
+        discoveryError: String? = null
+    ): CallToolResult {
+        val (writable, target) = suspendingReadAction {
+            val targetFile = preparation.element.containingFile?.virtualFile
+            (targetFile?.isWritable == true) to
+                resolvedSymbolInfo(project, preparation.element, preparation.previewSymbolId)
+        }
+        val warnings = mutableListOf<String>()
+        if (!writable) {
+            warnings.add("Target file is read-only or unavailable; the deletion cannot be applied.")
+        }
+        if (discoveryError != null) {
+            warnings.add(
+                "Usage discovery failed: $discoveryError. " +
+                    if (force) "Force allows deletion without a complete usage check."
+                    else "Refusing to mark this preview as applicable."
+            )
+        } else if (preparation.usages.isNotEmpty()) {
+            warnings.add(
+                if (force) {
+                    "Force deletion would leave ${preparation.usages.size} usage(s) unresolved."
+                } else {
+                    "Deletion is blocked by ${preparation.usages.size} usage(s); set force=true to override."
+                }
+            )
+        }
+
+        return createJsonResult(
+            refactoringPreview(
+                canApply = writable && (force || (discoveryError == null && preparation.usages.isEmpty())),
+                target = target,
+                plannedChange = buildJsonObject {
+                    put("operation", "safeDelete")
+                    put("targetType", "symbol")
+                    put("name", preparation.elementName)
+                    put("force", force)
+                },
+                affectedFiles = listOf(preparation.affectedFile),
+                usageCount = preparation.usages.size,
+                conflictCount = preparation.usages.size,
+                warnings = warnings,
+                startedAtNanos = startedAtNanos
+            )
+        )
+    }
+
+    private suspend fun createFileDeletePreview(
+        project: Project,
+        preparation: FileDeletePreparation,
+        force: Boolean,
+        startedAtNanos: Long,
+        discoveryError: String? = null
+    ): CallToolResult {
+        val (writable, target) = suspendingReadAction {
+            val targetFile = preparation.psiFile.virtualFile
+            (targetFile?.isWritable == true) to resolvedSymbolInfo(project, preparation.psiFile)
+        }
+        val warnings = mutableListOf<String>()
+        if (!writable) {
+            warnings.add("Target file is read-only or unavailable; the deletion cannot be applied.")
+        }
+        if (discoveryError != null) {
+            warnings.add(
+                "Usage discovery failed: $discoveryError. " +
+                    if (force) "Force allows deletion without a complete usage check."
+                    else "Refusing to mark this preview as applicable."
+            )
+        } else if (preparation.externalUsages.isNotEmpty()) {
+            warnings.add(
+                if (force) {
+                    "Force deletion would leave ${preparation.externalUsages.size} external usage(s) unresolved."
+                } else {
+                    "Deletion is blocked by ${preparation.externalUsages.size} external usage(s); " +
+                        "set force=true to override."
+                }
+            )
+        }
+        if (preparation.symbols.isEmpty()) {
+            warnings.add(
+                preparation.incompleteDiscoveryReason
+                    ?: "No top-level declarations were found; complete usage discovery cannot be proven."
+            )
+        }
+
+        return createJsonResult(
+            refactoringPreview(
+                canApply = writable && (force || (discoveryError == null && preparation.externalUsages.isEmpty())),
+                target = target,
+                plannedChange = buildJsonObject {
+                    put("operation", "safeDelete")
+                    put("targetType", "file")
+                    put("name", preparation.fileName)
+                    put("force", force)
+                },
+                affectedFiles = listOf(preparation.filePath),
+                usageCount = preparation.externalUsages.size,
+                conflictCount = preparation.externalUsages.size,
+                warnings = warnings,
+                startedAtNanos = startedAtNanos
+            )
+        )
+    }
 
     private suspend fun applySymbolDeletion(
         project: Project,
@@ -332,8 +614,9 @@ class SafeDeleteTool : AbstractRefactoringTool() {
                 .run<Throwable> {
                     try {
                         if (!preparation.element.isValid) {
-                            errorMessage = "Element '${preparation.elementName}' is no longer valid — " +
-                                "the file changed since usages were checked. Retry the operation."
+                            errorMessage = preparation.symbolId?.let(ErrorMessages::symbolIdExpired)
+                                ?: "Element '${preparation.elementName}' is no longer valid — " +
+                                    "the file changed since usages were checked. Retry the operation."
                             return@run
                         }
                         preparation.element.delete()
@@ -358,11 +641,16 @@ class SafeDeleteTool : AbstractRefactoringTool() {
                         "Force-deleted '${preparation.elementName}' (had ${preparation.usages.size} usage(s) that may now be broken)"
                     } else {
                         "Successfully deleted '${preparation.elementName}'"
-                    }
+                    },
+                    invalidatedSymbolId = preparation.symbolId
                 )
             )
         } else {
-            createErrorResult("Safe delete failed: ${errorMessage ?: "Unknown error"}", ToolNames.DIAGNOSTICS)
+            if (errorMessage?.startsWith("SYMBOL_ID_EXPIRED:") == true) {
+                createErrorResult(errorMessage!!)
+            } else {
+                createErrorResult("Safe delete failed: ${errorMessage ?: "Unknown error"}", ToolNames.DIAGNOSTICS)
+            }
         }
     }
 
@@ -429,11 +717,12 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         file: String,
         line: Int,
         column: Int,
-        force: Boolean
+        force: Boolean,
+        allowReadOnly: Boolean = false
     ): SymbolPreparationResult {
         val psiFile = PsiUtils.getPsiFile(project, file)
             ?: return SymbolPreparationResult.FileNotFound(file)
-        if (psiFile.virtualFile?.isWritable == false) {
+        if (!allowReadOnly && psiFile.virtualFile?.isWritable == false) {
             return SymbolPreparationResult.ReadOnly(psiFile.virtualFile.path)
         }
 
@@ -478,7 +767,16 @@ class SafeDeleteTool : AbstractRefactoringTool() {
             findUsages(project, element, excludeWithin = element)
         } catch (e: UsageSearchException) {
             if (!force) {
-                return SymbolPreparationResult.UsageSearchFailed(searchFailureReason(e))
+                return SymbolPreparationResult.UsageSearchFailed(
+                    searchFailureReason(e),
+                    SymbolDeletePreparation(
+                        element = element,
+                        elementName = elementName,
+                        elementType = elementType,
+                        usages = emptyList(),
+                        affectedFile = affectedFile
+                    )
+                )
             }
             // force=true means "delete regardless of usages", so a failed search cannot block it.
             emptyList()
@@ -491,6 +789,95 @@ class SafeDeleteTool : AbstractRefactoringTool() {
                 elementType = elementType,
                 usages = usages,
                 affectedFile = affectedFile
+            )
+        )
+    }
+
+    private fun prepareSymbolDeleteBySemanticTarget(
+        project: Project,
+        arguments: JsonObject,
+        symbolId: String?,
+        force: Boolean,
+        allowReadOnly: Boolean = false
+    ): SymbolPreparationResult {
+        val resolved = resolveElementFromArguments(project, arguments, allowSymbolId = true).getOrElse {
+            return SymbolPreparationResult.InvalidSymbolId(
+                it.message ?: symbolId?.let(ErrorMessages::symbolIdExpired) ?: ErrorMessages.COULD_NOT_RESOLVE_SYMBOL
+            )
+        }
+        val element = PsiUtils.resolveNavigationTarget(resolved) as? PsiNamedElement
+            ?: return SymbolPreparationResult.InvalidSymbolId(
+                if (symbolId != null) "symbolId '$symbolId' does not identify a deletable named symbol"
+                else "Target does not identify a deletable named symbol"
+            )
+        if (element.language.id == "kotlin" && resolved is PsiMethod && resolved !== element) {
+            // Generated JVM members may navigate to an enclosing class, property, or constructor.
+            // Only a matching source function/constructor is an exact deletion target.
+            val isSourceFunction = Class.forName("org.jetbrains.kotlin.psi.KtFunction").isInstance(element)
+            val isSourceConstructor = Class.forName("org.jetbrains.kotlin.psi.KtConstructor").isInstance(element)
+            val matchesSourceMethod = isSourceFunction && resolved.isConstructor == isSourceConstructor &&
+                PsiUtils.toLightMethods(element).any { method ->
+                    method.name == resolved.name &&
+                        method.parameterList.parameters.map { it.type.canonicalText } ==
+                        resolved.parameterList.parameters.map { it.type.canonicalText }
+                }
+            if (!matchesSourceMethod) {
+                return SymbolPreparationResult.InvalidSymbolId(
+                    "The selected JVM method has no standalone Kotlin declaration to delete. " +
+                        "Select the intended source declaration explicitly."
+                )
+            }
+        }
+        // A Java-signature lookup or exact handle may resolve to a Kotlin light method while the
+        // actual deletion target is its source navigation element. Preview metadata describes the
+        // source target, but must not rebind the caller's exact light-element handle to a different
+        // PSI identity. This mirrors rename preview's identity guard.
+        val previewSymbolId = symbolId?.takeIf { resolved === element }
+        if (element is PsiFile) {
+            return SymbolPreparationResult.InvalidSymbolId(
+                if (symbolId != null) "symbolId '$symbolId' identifies a file; use target_type='file' with its file path"
+                else "Target identifies a file; use target_type='file' with its file path"
+            )
+        }
+        val virtualFile = element.containingFile?.virtualFile
+            ?: return SymbolPreparationResult.InvalidSymbolId(
+                symbolId?.let(ErrorMessages::symbolIdExpired) ?: "Target has no editable source file"
+            )
+        if (!allowReadOnly && !virtualFile.isWritable) {
+            return SymbolPreparationResult.ReadOnly(virtualFile.path)
+        }
+
+        val elementName = element.name ?: "unnamed"
+        val elementType = getElementType(element)
+        val affectedFile = getRelativePath(project, virtualFile)
+        val usages = try {
+            findUsages(project, element, excludeWithin = element)
+        } catch (e: UsageSearchException) {
+            if (!force) {
+                return SymbolPreparationResult.UsageSearchFailed(
+                    searchFailureReason(e),
+                    SymbolDeletePreparation(
+                        element = element,
+                        elementName = elementName,
+                        elementType = elementType,
+                        usages = emptyList(),
+                        affectedFile = affectedFile,
+                        symbolId = symbolId,
+                        previewSymbolId = previewSymbolId
+                    )
+                )
+            }
+            emptyList()
+        }
+        return SymbolPreparationResult.Success(
+            SymbolDeletePreparation(
+                element = element,
+                elementName = elementName,
+                elementType = elementType,
+                usages = usages,
+                affectedFile = affectedFile,
+                symbolId = symbolId,
+                previewSymbolId = previewSymbolId
             )
         )
     }
@@ -581,11 +968,12 @@ class SafeDeleteTool : AbstractRefactoringTool() {
     private fun prepareFileDelete(
         project: Project,
         file: String,
-        force: Boolean
+        force: Boolean,
+        allowReadOnly: Boolean = false
     ): FilePreparationResult {
         val psiFile = PsiUtils.getPsiFile(project, file)
             ?: return FilePreparationResult.FileNotFound
-        if (psiFile.virtualFile?.isWritable == false) {
+        if (!allowReadOnly && psiFile.virtualFile?.isWritable == false) {
             return FilePreparationResult.ReadOnly(psiFile.virtualFile.path)
         }
 
@@ -622,13 +1010,21 @@ class SafeDeleteTool : AbstractRefactoringTool() {
 
             // Layer 2: Check if the file maps to a resource element (e.g., Android resource).
             // Uses the same prepareRenaming probe as RenameSymbolTool.computeEffectiveNewName.
-            if (externalUsages.isEmpty()) {
+            // Apply may stop after a blocking usage, but a preview must account for every
+            // discovery layer: with force=true its count is otherwise deceptively partial.
+            if (externalUsages.isEmpty() || allowReadOnly) {
                 ProgressManager.checkCanceled()
-                externalUsages.addAll(findResourceElementUsages(project, psiFile, filePath))
+                externalUsages.addAll(
+                    findResourceElementUsages(
+                        project,
+                        psiFile,
+                        filePath
+                    )
+                )
             }
 
             // Layer 3: Search top-level declarations for external usages.
-            if (externalUsages.isEmpty()) {
+            if (externalUsages.isEmpty() || allowReadOnly) {
                 for ((element, _, _) in topLevelElements) {
                     ProgressManager.checkCanceled()
                     for (usage in findUsages(project, element)) {
@@ -640,7 +1036,17 @@ class SafeDeleteTool : AbstractRefactoringTool() {
             }
         } catch (e: UsageSearchException) {
             if (!force) {
-                return FilePreparationResult.UsageSearchFailed(searchFailureReason(e))
+                return FilePreparationResult.UsageSearchFailed(
+                    searchFailureReason(e),
+                    FileDeletePreparation(
+                        psiFile = psiFile,
+                        fileName = fileName,
+                        filePath = filePath,
+                        symbols = symbols,
+                        externalUsages = previewUsageList(externalUsages, allowReadOnly),
+                        incompleteDiscoveryReason = incompleteFileDiscoveryReason(topLevelElements)
+                    )
+                )
             }
             // force=true means "delete regardless of usages", so a failed search cannot block it.
         }
@@ -651,7 +1057,8 @@ class SafeDeleteTool : AbstractRefactoringTool() {
                 fileName = fileName,
                 filePath = filePath,
                 symbols = symbols,
-                externalUsages = externalUsages
+                externalUsages = previewUsageList(externalUsages, allowReadOnly),
+                incompleteDiscoveryReason = incompleteFileDiscoveryReason(topLevelElements)
             )
         )
     }
@@ -676,8 +1083,12 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         val probeRenames = linkedMapOf<PsiElement, String>(psiFile to psiFile.name)
         try {
             processor.prepareRenaming(psiFile, psiFile.name, probeRenames)
-        } catch (_: Exception) {
-            return emptyList()
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: IndexNotReadyException) {
+            throw e
+        } catch (e: Exception) {
+            throw if (e is UsageSearchException) e else UsageSearchException(e)
         }
 
         // If the PsiFile was substituted, search for usages of the substitute element
@@ -690,6 +1101,27 @@ class SafeDeleteTool : AbstractRefactoringTool() {
 
         return emptyList()
     }
+
+    /**
+     * File deletion has no generic semantic target when a language exposes no top-level
+     * declarations. Direct file/resource references are useful evidence, but not proof that a
+     * cross-language reference search is complete. Keep that limitation visible in previews even
+     * though it does not change the existing file-delete eligibility by itself.
+     */
+    private fun incompleteFileDiscoveryReason(
+        topLevelElements: List<Triple<PsiNamedElement, Int, Int>>
+    ): String? = if (topLevelElements.isEmpty()) {
+        "No top-level declarations were found; direct file/resource references were checked, " +
+            "but complete usage discovery cannot be proven."
+    } else {
+        null
+    }
+
+    /** Avoid double-counting the same location when preview runs every discovery layer. */
+    private fun previewUsageList(
+        usages: List<UsageInfo>,
+        preview: Boolean
+    ): List<UsageInfo> = if (preview) usages.distinct() else usages
 
     /**
      * Collects the file's top-level declarations — the symbols whose *external* references are
@@ -867,30 +1299,91 @@ class SafeDeleteTool : AbstractRefactoringTool() {
         excludeWithin: PsiElement? = null
     ): List<UsageInfo> {
         val usages = mutableListOf<UsageInfo>()
+        val seenLocations = mutableSetOf<Pair<String, Int>>()
+
+        fun recordUsage(usageElement: PsiElement) {
+            if (excludeWithin != null && PsiTreeUtil.isAncestor(excludeWithin, usageElement, false)) {
+                return
+            }
+            val usageFile = usageElement.containingFile
+            val virtualFile = usageFile?.virtualFile ?: return
+            val document = PsiDocumentManager.getInstance(project).getDocument(usageFile)
+            val (lineNumber, columnNumber) = positionOf(document, usageElement.textOffset)
+            val filePath = getRelativePath(project, virtualFile)
+            // Display coordinates degrade to 0:0 when a document is unavailable. The VFS URL and
+            // PSI offset still distinguish separate usages in such files.
+            if (!seenLocations.add(virtualFile.url to usageElement.textOffset)) return
+
+            usages.add(
+                UsageInfo(
+                    file = filePath,
+                    line = lineNumber,
+                    column = columnNumber,
+                    context = getContextLine(document, lineNumber)
+                )
+            )
+        }
 
         try {
             usageSearchHook?.invoke()
             ReferencesSearch.search(element).forEach { reference ->
                 ProgressManager.checkCanceled() // Allow cancellation
+                recordUsage(reference.element)
+            }
 
-                val refElement = reference.element
-                if (excludeWithin != null && PsiTreeUtil.isAncestor(excludeWithin, refElement, false)) {
-                    return@forEach
+            // A Java override/implementation is a semantic dependency, not a PsiReference to
+            // the base declaration, so ReferencesSearch alone can report a dangerously clean
+            // result. The apply path performs a literal element.delete(); it cannot repair or
+            // remove overriding declarations. Treat every descendant override as blocking unless
+            // the caller explicitly opts into force=true.
+            val hierarchyMethods = if (element is PsiMethod) {
+                listOf(element)
+            } else {
+                // Exact Java-signature targets are normalized to their Kotlin source declaration
+                // before this search. Convert them back to light methods solely for hierarchy
+                // discovery so an override cannot disappear from the safety check.
+                PsiUtils.toLightMethods(element)
+            }
+            hierarchyMethods.distinct().forEach { method ->
+                OverridingMethodsSearch.search(method, true).forEach { overridingMethod ->
+                    ProgressManager.checkCanceled()
+                    recordUsage(overridingMethod.nameIdentifier ?: overridingMethod)
                 }
-                val refFile = refElement.containingFile?.virtualFile
+            }
 
-                if (refFile != null) {
-                    val document = PsiDocumentManager.getInstance(project).getDocument(refElement.containingFile)
-                    val (lineNumber, columnNumber) = positionOf(document, refElement.textOffset)
-
-                    usages.add(
-                        UsageInfo(
-                            file = getRelativePath(project, refFile),
-                            line = lineNumber,
-                            column = columnNumber,
-                            context = getContextLine(document, lineNumber)
-                        )
-                    )
+            // Call-site arguments do not reference their declaration's PsiParameter, so a plain
+            // ReferencesSearch(parameter) is always incomplete. Ask the platform safe-delete
+            // delegates for parameter-specific usages (Java call arguments, override chains, and
+            // the equivalent contributed by an installed Kotlin plugin), but keep the apply path
+            // conservative: every discovered external element blocks our literal delete unless
+            // force=true.
+            val isKotlinParameter = element.javaClass.name == "org.jetbrains.kotlin.psi.KtParameter"
+            // Java's delegate casts a parameter's declaration scope to PsiMethod. Lambda,
+            // catch and foreach parameters are local bindings and need only ReferencesSearch.
+            val isJavaMethodParameter = element is PsiParameter && element.declarationScope is PsiMethod
+            if (isJavaMethodParameter) {
+                val method = (element as PsiParameter).declarationScope as PsiMethod
+                val parameterIndex = method.parameterList.getParameterIndex(element)
+                fun recordHierarchyParameter(related: PsiMethod) {
+                    ProgressManager.checkCanceled()
+                    related.parameterList.parameters.getOrNull(parameterIndex)?.let(::recordUsage)
+                }
+                // The public safe-delete usage query does not run getElementsToSearch(), which
+                // is where Java's processor collects related parameters. Our literal deletion
+                // cannot change the hierarchy, so both super and overriding parameters block it.
+                method.findSuperMethods().forEach(::recordHierarchyParameter)
+                OverridingMethodsSearch.search(method, true).forEach { overriding ->
+                    recordHierarchyParameter(overriding)
+                }
+            }
+            if (isJavaMethodParameter || isKotlinParameter) {
+                val refactoring = RefactoringFactory.getInstance(project).createSafeDelete(arrayOf(element))
+                refactoring.setSearchInComments(false)
+                refactoring.setSearchInNonJavaFiles(false)
+                refactoring.findUsages().forEach { usage ->
+                    ProgressManager.checkCanceled()
+                    val usageElement = usage.element ?: return@forEach
+                    if (usageElement !== element) recordUsage(usageElement)
                 }
             }
         } catch (e: ProcessCanceledException) {

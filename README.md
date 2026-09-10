@@ -324,7 +324,7 @@ PHP file structure support requires the PHP plugin and is available in PhpStorm 
 |------|-------------|
 | `ide_list_tests` | List all test methods/classes discovered by the IDE's test framework extension points (JUnit, TestNG, etc.) *(disabled by default, requires Java plugin)* |
 | `ide_convert_java_to_kotlin` | Convert Java files to Kotlin using IntelliJ's built-in converter *(disabled by default, requires Java + Kotlin plugins)* |
-| `ide_refactor_safe_delete` | Safely delete an element, checking for usages first (Java/Kotlin only) |
+| `ide_refactor_safe_delete` | Preview or safely delete an exact/nested symbol target or file after checking usages (Java/Kotlin only) |
 
 > **Note**: Applied refactorings modify source files and support undo via
 > <kbd>Ctrl/Cmd+Z</kbd>. `dryRun: true` previews do not modify files or create an undo command.

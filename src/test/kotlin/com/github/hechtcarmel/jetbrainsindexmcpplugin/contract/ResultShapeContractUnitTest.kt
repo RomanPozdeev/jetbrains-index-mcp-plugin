@@ -722,7 +722,8 @@ class ResultShapeContractUnitTest : TestCase() {
                     message = "Renamed 'handle' to 'process'",
                     warnings = listOf("1 usage in a comment was not updated"),
                     unretargetedImporters = listOf("src/main/java/com/example/Caller.java"),
-                    updatedSymbol = updatedSymbol
+                    updatedSymbol = updatedSymbol,
+                    invalidatedSymbolId = "sym_safe_delete"
                 )
             ),
             struct(

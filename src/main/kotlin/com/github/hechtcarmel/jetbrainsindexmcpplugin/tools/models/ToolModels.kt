@@ -316,7 +316,8 @@ data class RefactoringResult(
     val message: String,
     val warnings: List<String>? = null,
     val unretargetedImporters: List<String>? = null,
-    val updatedSymbol: ResolvedSymbolInfo? = null
+    val updatedSymbol: ResolvedSymbolInfo? = null,
+    val invalidatedSymbolId: String? = null
 )
 
 

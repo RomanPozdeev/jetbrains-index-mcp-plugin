@@ -466,10 +466,12 @@ call sites". It is thin in these areas:
   for tests. `KotlinRenameBaseBehaviorTest` covers headless base selection, Kotlin/Java interfaces,
   overrides and call sites, handles from super-method queries, preview with and without a base,
   and aborting failed discovery. It guards the interactive entry point because Kotlin's unit-test
-  mode auto-confirms the super-method chooser. Other Kotlin-specific paths still need dedicated
-  behavior coverage or manual IDE verification. The opt-in configuration keeps the plugin's newer
-  metadata off `compileTestKotlin` and removes the Gradle-injected stdlib from the test runtime so
-  the IDE's matching stdlib is used; an older runtime stdlib causes
+  mode auto-confirms the super-method chooser. The safe-delete fixtures cover used lambda/catch/loop
+  parameters, Java-signature lookup of Kotlin source declarations, and refusal of implicit
+  constructors, generated `copy` methods, and property accessors. Other Kotlin-specific paths still
+  need dedicated behavior coverage or manual IDE verification. The opt-in configuration keeps the
+  plugin's newer metadata off `compileTestKotlin` and removes the Gradle-injected stdlib from the
+  test runtime so the IDE's matching stdlib is used; an older runtime stdlib causes
   `NoSuchMethodError: SequencesKt.sequenceOf` during Kotlin usage search.
 - **Some tools are still never executed by any test**, only schema- and response-shape-checked:
   `ide_build_project`, `ide_reload_project`, `ide_import_modules`, `ide_open_workspace`,

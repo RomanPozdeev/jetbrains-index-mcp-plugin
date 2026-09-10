@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ide_refactor_safe_delete` supports the shared non-mutating preview response and exact/nested symbol targets. Applied deletion by handle reports that handle as `invalidatedSymbolId`.
+
+### Fixed
+
+- Safe-delete previews now agree with apply for forced file deletion without declarations or complete usage discovery. Usage checks cover hierarchy overrides and Java/Kotlin method parameters without treating unrelated non-code text as a blocker or asserting on lambda, catch, and loop bindings. Kotlin light targets resolve to exact source declarations without changing the input handle's PSI identity; generated JVM methods without matching standalone source declarations are rejected. Apply also refuses deletion when resource discovery fails.
+
 ## [5.12.0] - 2026-09-14
 
 ### Added

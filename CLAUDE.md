@@ -440,8 +440,9 @@ plugin:
   untestable.
 
 `-PkotlinPluginTests=true` additionally loads the bundled Kotlin plugin and the sources under
-`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest`. The plugin's newer
-metadata is excluded from test compilation; the test runtime uses the IDE's matching stdlib.
+`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest` and the safe-delete
+parameter, qualified-target, and synthetic-target behavior tests. The plugin's newer metadata is
+excluded from test compilation; the test runtime uses the IDE's matching stdlib.
 
 `gradle.properties` also adds `JavaScript` to `platformBundledPlugins`. That one is *not*
 test-only in form — it is a compile/test classpath entry — but it does not change what the plugin
@@ -559,7 +560,7 @@ These activate based on available language plugins (Java, Python, JavaScript/Typ
 - `ide_list_tests` - List all test methods/classes discovered by the IDE's test framework extension points (JUnit, TestNG, etc.). Optional `file` parameter limits scan to a single file. Returns entries with className, methodName, framework, file path, and line number. Requires Java plugin — the `com.intellij.testFramework` extension point is declared by the Java plugin. (disabled by default)
 - `ide_edit_member` - Replace an entire member declaration (signature + body) with new content (disabled by default)
 - `ide_insert_member` - Insert a new member at a structural position in a class or file (disabled by default)
-- `ide_refactor_safe_delete` - Safely delete element (requires Java plugin)
+- `ide_refactor_safe_delete` - Preview or safely delete a symbol/file after usage discovery; accepts legacy selectors, `symbolId`, or a nested `target` (requires Java plugin)
 - `ide_replace_member` - Replace method body or field initializer only, preserving the signature (disabled by default)
 
 **Kotlin Conversion Tools:**
@@ -648,6 +649,15 @@ Validation runs before PSI synchronization, and `target.symbolId` routes to its 
 and conflict counts, `warnings`, and `elapsedMs` without entering the source-write phase, saving
 documents, or creating an undo command. Preview and apply share conflict discovery and automatic
 rename selection.
+
+### Safe-delete Preview
+
+`ide_refactor_safe_delete` accepts the same `dryRun: true` preview contract with legacy selectors,
+`symbolId`, or a nested `target`. It reports the planned symbol/file deletion, usage blockers, and
+current applicability without deleting or saving anything or invalidating a handle. Successful
+symbol deletion selected by an incoming handle returns it as `invalidatedSymbolId`. Files with no
+discovered top-level declarations retain the existing apply eligibility but carry an
+incomplete-discovery warning; `force` can explicitly override usages or a failed usage search.
 
 ### Search Collection Pattern (Processor)
 

@@ -2015,7 +2015,8 @@ description:
   Delete a symbol or file safely by first checking for usages. Use when removing code to avoid breaking references.
   
   Modes:
-  - target_type='symbol' (default): Delete the symbol at line/column (REQUIRED: file, line, column).
+  - target_type='symbol' (default): Delete the exact symbol selected by symbolId,
+    language + symbol, or file + line/column. The equivalent nested target is also supported.
     If position is whitespace/comment, returns nearby symbol suggestions.
   - target_type='file': Delete the entire file (REQUIRED: file only).
     Only succeeds if no symbols have external usages. Internal call chains don't block deletion.
@@ -2023,9 +2024,11 @@ description:
   Behavior: If usages exist and force=false, returns the usage list instead of deleting.
   Use force=true to delete anyway (may break compilation).
   
-  Returns: success status and affected files, OR blocking usages list, OR nearby symbol suggestions.
+  With dryRun=true, returns the shared non-mutating refactoring preview.
+  Otherwise returns success status and affected files, a blocking usages list, or nearby symbol suggestions.
   
   Examples:
+  - Symbol ID: {"symbolId": "<opaque-id>"}
   - Symbol: {"file": "src/OldClass.java", "line": 10, "column": 14}
   - Symbol with force: {"file": "src/OldClass.java", "line": 10, "column": 14, "force": true}
   - File: {"file": "src/UnusedUtils.java", "target_type": "file"}
@@ -2035,12 +2038,17 @@ schema:
     {
       "column":
       {
-        "description": "1-based column number. REQUIRED when target_type='symbol' (default).",
+        "description": "1-based column number for position-based symbol deletion. Required with file and line.",
         "type": "integer"
+      },
+      "dryRun":
+      {
+        "description": "Resolve the target and check usages without deleting anything. Default: false.",
+        "type": "boolean"
       },
       "file":
       {
-        "description": "Path to file relative to project root. REQUIRED.",
+        "description": "Path to file relative to project root. Required for file deletion or position-based symbol deletion; omit when symbolId is used.",
         "type": "string"
       },
       "force":
@@ -2049,9 +2057,21 @@ schema:
         "description": "Force deletion even if usages exist. Default: false. Use with caution!",
         "type": "boolean"
       },
+      "language":
+      {
+        "description": "Language of the symbol. Required when using 'symbol' parameter. Currently supported languages: Java, Kotlin, JavaScript, TypeScript.",
+        "enum":
+        [
+          "Java",
+          "Kotlin",
+          "JavaScript",
+          "TypeScript"
+        ],
+        "type": "string"
+      },
       "line":
       {
-        "description": "1-based line number where the symbol is located. REQUIRED when target_type='symbol' (default).",
+        "description": "1-based line number for position-based symbol deletion. Required with file and column.",
         "type": "integer"
       },
       "project_path":
@@ -2059,10 +2079,71 @@ schema:
         "description": "Absolute path to the project root. Required when multiple projects are open. For workspace projects, use the sub-project path.",
         "type": "string"
       },
+      "symbol":
+      {
+        "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Mutually exclusive with flat selector parameters.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin.",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "target_type":
       {
         "default": "symbol",
-        "description": "What to delete: 'symbol' (default, requires line+column) or 'file' (deletes entire file if no external usages).",
+        "description": "What to delete: 'symbol' (default, requires one symbol selector) or 'file' (requires only file and deletes it if no external usages block the operation).",
         "enum":
         [
           "symbol",
@@ -2071,10 +2152,6 @@ schema:
         "type": "string"
       }
     },
-    "required":
-    [
-      "file"
-    ],
     "type": "object"
   }
 
