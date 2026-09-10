@@ -12,6 +12,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.ToolRegistry
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.UnifiedTargetArguments
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.asContextElement
@@ -123,12 +124,19 @@ class McpToolDispatcher @JvmOverloads constructor(
         }
         val projectPath = (projectPathElement as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
-        val rawSymbolId = arguments[ParamNames.SYMBOL_ID]
-        val acceptsSymbolId = tool.inputSchema.properties?.containsKey(ParamNames.SYMBOL_ID) == true
-        val symbolId = if (!acceptsSymbolId || rawSymbolId == null || rawSymbolId is JsonNull) null else {
-            (rawSymbolId as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
-                ?.takeIf { it.isNotBlank() }
-                ?: return CallToolResult.error("Parameter 'symbolId' must be a non-blank string.")
+        val schemaProperties = tool.inputSchema.properties
+        val acceptsSymbolId = schemaProperties?.containsKey(ParamNames.SYMBOL_ID) == true
+        val acceptsUnifiedTarget = UnifiedTargetArguments.isSupportedBy(tool.inputSchema)
+        val symbolId = if (!acceptsSymbolId && !acceptsUnifiedTarget) {
+            null
+        } else {
+            UnifiedTargetArguments.symbolIdForRouting(
+                arguments = arguments,
+                acceptsLegacySymbolId = acceptsSymbolId,
+                acceptsNestedTarget = acceptsUnifiedTarget
+            ).getOrElse {
+                return CallToolResult.error(it.message ?: "Invalid symbolId target")
+            }
         }
 
         val project = if (projectPath == null && symbolId != null) {

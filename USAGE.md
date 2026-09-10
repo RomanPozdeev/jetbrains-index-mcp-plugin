@@ -191,6 +191,14 @@ enum methods) also expire after their backing source file changes because a hard
 prove that the exact synthetic declaration survived the edit. Rediscover the target after
 `SYMBOL_ID_EXPIRED`.
 
+### Structured Lookup Targets
+
+`ide_find_definition` and `ide_symbol_info` also accept a nested `target` with exactly one
+variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "line": 3,
+"column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
+Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
+Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
+
 ### Symbol Reference Parameters
 
 Some tools support identifying the target element by fully qualified symbol reference instead of file position. The following parameters are available as an alternative to `file` + `line` + `column`:
@@ -361,12 +369,13 @@ Finds the definition/declaration location of a symbol at a given source location
 - Understanding where a method, class, variable, or field is declared
 - Looking up the original definition from a usage site
 
-**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** top-level `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`; this tool also accepts the equivalent nested `target`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | Conditional | Exactly one of `symbolId`, `position` (`file`, `line`, `column`), or `qualifiedName` + `language`. Do not combine with top-level selectors. |
 | `symbolId` | string | Conditional | Opaque handle returned by this tool or `ide_symbol_info`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
@@ -447,12 +456,13 @@ types as the IDE resolved them.
 | `quick_navigation` | Any language with a documentation provider — Kotlin, Python, JS/TS, Go, PHP, Rust | As that language's Quick Documentation renders them; often short |
 | `element_text` | No documentation provider answered | The declaration's own source line |
 
-**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** top-level `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`; this tool also accepts the equivalent nested `target`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | Conditional | Exactly one of `symbolId`, `position` (`file`, `line`, `column`), or `qualifiedName` + `language`. Do not combine with top-level selectors. |
 | `symbolId` | string | Conditional | Opaque handle returned by this tool or `ide_find_definition`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |

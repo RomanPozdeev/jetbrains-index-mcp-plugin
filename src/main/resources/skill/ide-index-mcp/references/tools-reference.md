@@ -88,10 +88,11 @@ Find all usages of a symbol (semantic, not text search).
 ### ide_find_definition
 Go to where a symbol is defined.
 
-**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** top-level `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`; this tool also accepts the equivalent nested `target`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | conditional | Exactly one of `symbolId`, `position` (`file`, `line`, `column`), or `qualifiedName` + `language`. Do not combine with top-level selectors. |
 | `symbolId` | string | conditional | Opaque handle returned by this tool or `ide_symbol_info`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
@@ -110,10 +111,11 @@ Resolved signature and documentation of the symbol at a position — the declara
 `ide_find_definition` cannot give, because its preview is source text with unresolved short type
 names and no doc comment.
 
-**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** top-level `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`; this tool also accepts the equivalent nested `target`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `target` | object | conditional | Exactly one of `symbolId`, `position` (`file`, `line`, `column`), or `qualifiedName` + `language`. Do not combine with top-level selectors. |
 | `symbolId` | string | conditional | Opaque handle returned by this tool or `ide_find_definition`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |

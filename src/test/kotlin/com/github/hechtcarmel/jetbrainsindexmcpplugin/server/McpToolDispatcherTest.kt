@@ -7,6 +7,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.mcp.McpToolDispatch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.isFailure
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.text
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.McpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.ToolRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
@@ -24,6 +25,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import java.nio.file.Files
 
 /**
@@ -62,6 +64,47 @@ class McpToolDispatcherTest : BasePlatformTestCase() {
         })
 
         assertFalse("an undeclared symbolId must be ignored by the dispatcher: ${result.text}", result.isFailure)
+    }
+
+    fun testUndeclaredNestedTargetDoesNotRouteIndexStatus() = runBlocking {
+        val routedDispatcher = McpToolDispatcher(
+            toolRegistry = toolRegistry,
+            recordHistory = { _, _ -> },
+            updateHistory = { _, _, _, _, _ -> },
+            symbolIdRegistryProvider = { error("undeclared target must not consult the registry") }
+        )
+
+        val result = routedDispatcher.call(ToolNames.INDEX_STATUS, buildJsonObject {
+            putJsonObject("target") { put("symbolId", "not-a-handle") }
+        })
+
+        assertFalse("an undeclared target must be ignored by the dispatcher: ${result.text}", result.isFailure)
+    }
+
+    fun testStringValuedTargetSchemaDoesNotEnableNestedSymbolRouting() = runBlocking {
+        val stringTargetTool = object : McpTool {
+            override val name = "ide_string_target_probe"
+            override val description = "Test-only string target probe"
+            override val inputSchema = SchemaBuilder.tool()
+                .stringProperty("target", "Unrelated string-valued target")
+                .build()
+
+            override suspend fun execute(project: Project, arguments: JsonObject): CallToolResult =
+                CallToolResult(content = listOf(TextContent("executed")))
+        }
+        val probeRegistry = ToolRegistry().apply { register(stringTargetTool) }
+        val routedDispatcher = McpToolDispatcher(
+            toolRegistry = probeRegistry,
+            recordHistory = { _, _ -> },
+            updateHistory = { _, _, _, _, _ -> },
+            symbolIdRegistryProvider = { error("a string-valued target must not consult the symbol registry") }
+        )
+
+        val result = routedDispatcher.call(stringTargetTool.name, buildJsonObject {
+            putJsonObject("target") { put("symbolId", "not-a-handle") }
+        })
+
+        assertFalse("a string-valued target schema must not enable nested routing: ${result.text}", result.isFailure)
     }
 
     fun testNullSymbolIdIsTreatedAsAbsent() = runBlocking {
@@ -126,6 +169,49 @@ class McpToolDispatcherTest : BasePlatformTestCase() {
         }
     }
 
+    fun testNestedSymbolIdIsUsedForProjectRoutingBeforeToolExecution() = runBlocking {
+        var generated = 0
+        val serverEpoch = McpServerEpoch()
+        val registry = SymbolIdRegistry(
+            idGenerator = { "nested-route-${++generated}" },
+            serverEpoch = serverEpoch
+        ).also { Disposer.register(testRootDisposable, it) }
+        val psiFile = myFixture.addFileToProject("src/NestedRoute.java", "class NestedRoute {}")
+        val symbolId = ReadAction.compute<String, Throwable> { registry.bind(project, psiFile) }
+        var executedProject: Project? = null
+        val probe = RoutingProbeTool { executedProject = it }
+        val probeRegistry = ToolRegistry().apply { register(probe) }
+        val routedDispatcher = McpToolDispatcher(
+            toolRegistry = probeRegistry,
+            recordHistory = { _, _ -> },
+            updateHistory = { _, _, _, _, _ -> },
+            symbolIdRegistryProvider = { registry },
+            serverEpochProvider = { serverEpoch }
+        )
+
+        val success = routedDispatcher.call(probe.name, buildJsonObject {
+            putJsonObject("target") { put("symbolId", symbolId) }
+        })
+        assertFalse("valid nested handle should route to its owning project", success.isFailure)
+        assertSame(project, executedProject)
+
+        executedProject = null
+        val mixed = routedDispatcher.call(probe.name, buildJsonObject {
+            put("file", "src/NestedRoute.java")
+            putJsonObject("target") { put("symbolId", symbolId) }
+        })
+        assertTrue("mixed nested and flat selectors must fail", mixed.isFailure)
+        assertTrue(mixed.text, mixed.text.contains("mutually exclusive"))
+        assertTrue(mixed.text, mixed.text.contains("file"))
+        assertNull("normalization must reject the request before tool execution", executedProject)
+
+        val expired = routedDispatcher.call(probe.name, buildJsonObject {
+            putJsonObject("target") { put("symbolId", "missing-handle") }
+        })
+        assertTrue("unknown nested handle must fail routing even with one project open", expired.isFailure)
+        assertTrue(expired.text.contains("SYMBOL_ID_EXPIRED"))
+    }
+
     fun testToolCallWithValidTool() = runBlocking {
         val result = dispatcher.call(ToolNames.INDEX_STATUS, buildJsonObject { })
 
@@ -178,12 +264,16 @@ class McpToolDispatcherTest : BasePlatformTestCase() {
 
     private class RoutingProbeTool(
         private val onExecute: (Project) -> Unit
-    ) : McpTool {
+    ) : AbstractMcpTool() {
         override val name: String = "ide_symbol_id_routing_probe"
         override val description: String = "Test-only symbolId routing probe"
-        override val inputSchema: ToolSchema = SchemaBuilder.tool().symbolId().build()
+        override val inputSchema: ToolSchema = SchemaBuilder.tool()
+            .target()
+            .symbolId()
+            .file(required = false)
+            .build()
 
-        override suspend fun execute(project: Project, arguments: JsonObject): CallToolResult {
+        override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
             onExecute(project)
             return CallToolResult(content = listOf(TextContent("routed")))
         }

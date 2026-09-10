@@ -683,10 +683,8 @@ description:
   
   Returns: file path, line/column of definition, code preview, and symbol name.
   
-  Target (mutually exclusive):
-  - symbolId: opaque handle returned by a previous semantic call
-  - file + line + column: position-based lookup
-  - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
+  Target (choose one): symbolId; file + line + column; or language + symbol (supported languages: Java, Kotlin, JavaScript, TypeScript).
+  This tool also accepts the equivalent nested target with exactly one of symbolId, position, or qualifiedName + language. Do not mix request shapes.
   
   Example: {"file": "src/Main.java", "line": 15, "column": 10}
   Example: {"language": "Java", "symbol": "com.example.MyClass#processData(String)"}
@@ -747,6 +745,57 @@ schema:
       {
         "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
         "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Mutually exclusive with flat selector parameters.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin.",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"
@@ -2704,10 +2753,8 @@ description:
   
   Prefer this over ide_find_definition + reading the file when you only need the signature or the docs.
   
-  Target (mutually exclusive):
-  - symbolId: opaque handle returned by a previous semantic call
-  - file + line + column: position-based lookup, so overloads are addressable
-  - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
+  Target (choose one): symbolId; file + line + column; or language + symbol (supported languages: Java, Kotlin, JavaScript, TypeScript).
+  This tool also accepts the equivalent nested target with exactly one of symbolId, position, or qualifiedName + language. Do not mix request shapes.
   
   Example: {"file": "src/Main.java", "line": 15, "column": 10}
   Example: {"language": "Java", "symbol": "com.example.MyClass#processData(String)"}
@@ -2767,6 +2814,57 @@ schema:
       {
         "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
         "type": "string"
+      },
+      "target":
+      {
+        "description": "Choose symbolId, position, or qualifiedName+language. Mutually exclusive with flat selector parameters.",
+        "properties":
+        {
+          "language":
+          {
+            "description": "Language used to resolve qualifiedName.",
+            "type": "string"
+          },
+          "position":
+          {
+            "properties":
+            {
+              "column":
+              {
+                "description": "1-based column number",
+                "type": "integer"
+              },
+              "file":
+              {
+                "description": "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin.",
+                "type": "string"
+              },
+              "line":
+              {
+                "description": "1-based line number",
+                "type": "integer"
+              }
+            },
+            "required":
+            [
+              "file",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "qualifiedName":
+          {
+            "description": "Language-qualified symbol reference, for example com.example.Foo#bar.",
+            "type": "string"
+          },
+          "symbolId":
+          {
+            "description": "Same lifetime and non-canonical identity as top-level symbolId.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "type": "object"

@@ -50,10 +50,8 @@ class SymbolInfoTool : AbstractMcpTool() {
 
         Prefer this over ide_find_definition + reading the file when you only need the signature or the docs.
 
-        Target (mutually exclusive):
-        - symbolId: opaque handle returned by a previous semantic call
-        - file + line + column: position-based lookup, so overloads are addressable
-        - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()})
+        Target (choose one): symbolId; file + line + column; or language + symbol (supported languages: ${supportedSymbolReferenceLanguagesDescription()}).
+        This tool also accepts the equivalent nested target with exactly one of symbolId, position, or qualifiedName + language. Do not mix request shapes.
 
         Example: {"file": "src/Main.java", "line": 15, "column": 10}
         Example: {"language": "Java", "symbol": "com.example.MyClass#processData(String)"}
@@ -62,6 +60,7 @@ class SymbolInfoTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
         .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)

@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Definition and symbol-info tools accept an additive nested `target`: exactly one of `symbolId`, `position`, or `qualifiedName` with `language`. Mixed selectors fail validation; existing top-level selectors remain supported.
+
 ## [5.10.0] - 2026-09-13
 
 ### Added

@@ -495,8 +495,8 @@ Tools are organized by IDE availability.
 
 **Universal Tools (All Supported JetBrains IDEs):**
 - `ide_find_references` - Find all usages of a symbol. Supports `language`+`symbol` as alternative to `file`+`line`+`column`. Includes generated sources by default (`includeGenerated: true`) so valid runtime references (Dagger/MapStruct/gRPC/serializers) aren't missed; set `includeGenerated: false` to drop generated DI factories/mappers/stubs when they dominate results. Optional `paths` restricts results to project-relative globs (`!` prefix excludes).
-- `ide_find_definition` - Find symbol definition location. Accepts `symbolId`, `language`+`symbol`, or `file`+`line`+`column`, and returns a reusable `symbolId` for exact lookup after edits or rename.
-- `ide_symbol_info` - Resolved signature and documentation for a symbol, without reading the file. Java parameter/return types are expanded to fully qualified names with structured `parameters`; other languages fall back to the signature their own Quick Documentation renders. `signatureSource` reports which (`java_psi` / `quick_navigation` / `element_text`). Accepts `symbolId`, `language`+`symbol`, or `file`+`line`+`column`, and returns a reusable `symbolId`. (disabled by default)
+- `ide_find_definition` - Find symbol definition location. Accepts top-level `symbolId`, `language`+`symbol`, or `file`+`line`+`column`, plus an equivalent nested `target`, and returns a reusable `symbolId` for exact lookup after edits or rename.
+- `ide_symbol_info` - Resolved signature and documentation for a symbol, without reading the file. Java parameter/return types are expanded to fully qualified names with structured `parameters`; other languages fall back to the signature their own Quick Documentation renders. `signatureSource` reports which (`java_psi` / `quick_navigation` / `element_text`). Accepts the same flat or nested targets as `ide_find_definition` and returns a reusable `symbolId`. (disabled by default)
 - `ide_find_class` - Search for classes/interfaces by name with camelCase/substring/wildcard matching
 - `ide_find_file` - Search for files by name using IDE's file index
 - `ide_find_symbol` - Search for symbols (classes, methods, fields, functions) by name with IntelliJ Go to Symbol matching (disabled by default)
@@ -628,6 +628,14 @@ The plugin supports cursor-based pagination for search tools that return flat re
 **Schema:** All parameters are optional in the schema (no `required` array) because the Anthropic API does not support `anyOf`/`oneOf` at the top level. Validation is done at runtime — if `cursor` is absent, the tool checks for its required search params and returns an error if missing.
 
 **Backward compatibility:** Old `limit`/`maxResults` parameters work as aliases for `pageSize`. Legacy cursors (without embedded pageSize) are still decodable but require an explicit `pageSize` parameter.
+
+### Structured Lookup Targets
+
+`ide_find_definition` and `ide_symbol_info` accept an additive nested `target` with exactly one
+variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "line": 3,
+"column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
+Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
+Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
 
 ### Search Collection Pattern (Processor)
 
