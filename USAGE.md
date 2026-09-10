@@ -22,7 +22,7 @@ These tools work in every supported JetBrains IDE:
 | `ide_diagnostics` | Analyze file problems with fresh IDE diagnostics, plus optional build/test results | Enabled |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata; long analyses return an `analysisId` to poll | Disabled |
 | `ide_index_status` | Check indexing status | Enabled |
-| `ide_sync_files` | Force sync VFS/PSI cache | Enabled |
+| `ide_sync_files` | Force sync VFS/PSI cache, including deleted paths through existing parents | Enabled |
 | `ide_reload_project` | Reload linked Maven/Gradle build models | Disabled |
 | `ide_import_modules` | Import external Maven projects as modules | Disabled |
 | `ide_open_workspace` | Scan root directory for Maven projects, or open an explicit module list, in one window | Disabled |
@@ -958,7 +958,7 @@ Force the IDE to synchronize its virtual file system and PSI cache with external
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `paths` | array of strings | No | File or directory paths relative to project root to sync. If omitted, syncs the entire project |
+| `paths` | string[] | No | File or directory paths relative to the selected project/content root. A deleted path known to VFS refreshes its nearest existing parent; unknown missing paths are rejected. Absolute paths, `..` traversal, and symlink escapes are rejected. If omitted or empty, syncs the entire selected root |
 
 **Example Request:**
 
@@ -980,9 +980,20 @@ Force the IDE to synchronize its virtual file system and PSI cache with external
 {
   "syncedPaths": ["src/main/java/com/example/NewFile.java"],
   "syncedAll": false,
-  "message": "Synced 1 path(s)"
+  "message": "Synchronized 1 path(s).",
+  "requestedPaths": ["src/main/java/com/example/NewFile.java"],
+  "refreshedRoots": ["src/main/java/com/example/NewFile.java"],
+  "deletedPaths": []
 }
 ```
+
+For a requested path that no longer exists, `requestedPaths` and `deletedPaths` preserve the
+original relative path while `refreshedRoots` identifies the nearest existing parent actually
+refreshed shallowly. New paths are discovered one component at a time through shallow ancestor
+refreshes; only explicitly requested existing targets are refreshed recursively. `refreshedRoots`
+includes those discovery ancestors and explicit targets when neither refresh covers the other. The complete batch is validated before the VFS is touched, so one escaping or
+unsafe path fails the call without partially refreshing earlier paths. Neither `paths` nor a
+`project_path` routing hint can escape the selected project's base/content roots.
 
 ---
 

@@ -566,14 +566,16 @@ Check if IDE is ready for code intelligence operations.
 When `isDumbMode: true`, most tools will fail. Wait and retry.
 
 ### ide_sync_files
+
 Force sync IDE's virtual file system with external file changes.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `paths` | string[] | no | Relative paths to sync (empty = sync entire project) |
+| `paths` | string[] | no | Paths relative to the selected project/content root. Deleted targets refresh their nearest existing parent. Absolute paths, traversal, and symlink escapes are rejected. Empty/omitted = sync entire selected root |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ syncedPaths, syncedAll, message }`
+**Returns**: `{ syncedPaths, syncedAll, message, requestedPaths, refreshedRoots, deletedPaths }`
+`requestedPaths` echoes targeted input, `refreshedRoots` reports the roots actually refreshed, and `deletedPaths` identifies targets absent on disk. Discovery ancestors and deletion parents receive shallow refreshes; only explicitly requested existing targets receive recursive refreshes. A shallow ancestor does not replace a recursive target in `refreshedRoots`. The full batch is validated inside project/content roots before refresh begins.
 Call this when files were created/modified outside the IDE and search tools miss them.
 
 ### ide_build_project (disabled by default)

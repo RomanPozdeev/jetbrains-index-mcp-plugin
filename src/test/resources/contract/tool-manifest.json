@@ -2756,7 +2756,7 @@ schema:
     {
       "paths":
       {
-        "description": "File or directory paths relative to project root to sync. If omitted, syncs the entire project.",
+        "description": "Paths relative to the selected project/content root. Rejects absolute paths, traversal, symlink escapes and unknown missing paths. Deleted paths known to VFS refresh their nearest existing parent. Omit to sync the entire root.",
         "items":
         {
           "type": "string"

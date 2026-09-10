@@ -706,7 +706,10 @@ class ResultShapeContractUnitTest : TestCase() {
                 SyncFilesResult(
                     syncedPaths = listOf("/Users/dev/project/src"),
                     syncedAll = true,
-                    message = "Synced 1 path"
+                    message = "Synced 1 path",
+                    requestedPaths = listOf("src/main/java/com/example/Removed.java"),
+                    refreshedRoots = listOf("src/main/java/com/example"),
+                    deletedPaths = listOf("src/main/java/com/example/Removed.java")
                 )
             ),
             struct(BuildMessage.serializer(), buildMessage),

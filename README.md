@@ -276,7 +276,7 @@ These tools work in all supported JetBrains IDEs.
 | `ide_diagnostics` | Analyze file problems with fresh editor diagnostics for open files or public batch diagnostics for closed files, plus optional build/test results; intentions are best-effort |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata: a `complete` flag plus per-file `analyzed`/`timed_out`/`failed`/`skipped`/`not_analyzed` states, so an empty result can never be mistaken for a clean project. Long analyses return an `analysisId` to poll *(disabled by default)* |
 | `ide_index_status` | Check if the IDE is in dumb mode or smart mode |
-| `ide_sync_files` | Force sync IDE's virtual file system and PSI cache with external file changes |
+| `ide_sync_files` | Force sync IDE's virtual file system and PSI cache with external file changes, including deleted targets via their nearest existing parent |
 | `ide_reload_project` | Force-reload Maven or Gradle build model after modifying `pom.xml`/`build.gradle` *(disabled by default)* |
 | `ide_link_build_system` | Link an unlinked Maven/Gradle project for dependency resolution *(disabled by default)* |
 | `ide_import_modules` | Import external Maven project directories as modules into the current IntelliJ window *(disabled by default, requires Maven plugin)* |
