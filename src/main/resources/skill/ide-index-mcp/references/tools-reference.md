@@ -328,25 +328,29 @@ Read file content by path or qualified name, including library/jar sources.
 ## Intelligence Tools
 
 ### ide_diagnostics
-Get code diagnostics from multiple sources: per-file analysis (errors, warnings, quick fixes/intentions), build output from the last build, and test results from open test run tabs. At least one source must be active: provide `file` for code analysis, `includeBuildErrors` for build output, or `includeTestResults` for test results. Can combine all three.
+
+Get code diagnostics from multiple sources: one `file` or a small `files` batch, build output from the last build, and test results from open test run tabs. At least one source must be active: provide exactly one of `file`/`files` for code analysis, `includeBuildErrors` for build output, or `includeTestResults` for test results. Sources can be combined.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | no | Relative file path. Optional — enables per-file code analysis |
-| `line` | integer | no | For intention lookup (default 1, requires `file`) |
-| `column` | integer | no | For intention lookup (default 1, requires `file`) |
-| `startLine` | integer | no | Filter problems to range (requires `file`) |
-| `endLine` | integer | no | Filter problems to range (requires `file`) |
+| `file` | string | no | One project-relative or in-project absolute path. Mutually exclusive with `files` |
+| `files` | string[] | no | Up to 100 supplied relative or in-project absolute paths under one shared timeout budget. Aliases/duplicates are tolerated and analyzed once. Mutually exclusive with `file` |
+| `line` | integer | no | For intention lookup (default 1, single `file` only) |
+| `column` | integer | no | For intention lookup (default 1, single `file` only) |
+| `startLine` | integer | no | Filter problems to range (single `file` only) |
+| `endLine` | integer | no | Filter problems to range (single `file` only) |
 | `includeBuildErrors` | boolean | no | Include errors/warnings from the last build. Default false |
 | `includeTestResults` | boolean | no | Include test results from open test run tabs. Default false |
 | `severity` | enum | no | Filter by severity across all sources: `all` (default), `errors`, `warnings` |
+| `maxProblems` | integer | no | Max code problems returned across the file(s). Default 100, max 500 |
 | `testResultFilter` | enum | no | Filter test results: `failed` (default) or `all` |
 | `maxBuildErrors` | integer | no | Max build errors to return. Default 100, max 500 |
 | `maxTestResults` | integer | no | Max test results to return. Default 100, max 500 |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ problems: [{message, severity, file, line, column, endLine?, endColumn?}], intentions: [{name, description}], problemCount, intentionCount, analysisFresh, analysisTimedOut, analysisMessage, buildErrors?, buildErrorCount?, buildWarningCount?, buildErrorsTruncated?, buildTimestamp?, testResults?, testResultsTruncated?, testSummary? }`
-**Notes**: Open files use fresh daemon highlights. Closed files use public batch analysis, so `WEAK_WARNING` results and quick-fix intentions may be less complete unless the file is already open in an editor. The `analysisMode` field reports which path ran: `open_daemon` or `closed_batch` (null when no analysis ran). The file is refreshed from disk before analysis, so no `ide_sync_files` call is needed after editing it with an external tool.
+**Returns**: `{ problems: [{message, severity, file, line, column, endLine?, endColumn?}], intentions?, problemCount, problemsTruncated?, intentionCount?, analysisFresh?, analysisTimedOut?, analysisMessage?, analysisMode?, fileAnalyses?: [{file, state, reason?, mode?, problemCount, problemsTruncated}], buildErrors?, buildErrorCount?, buildWarningCount?, buildErrorsTruncated?, buildTimestamp?, testResults?, testResultsTruncated?, testSummary? }`
+**Output cap**: At most `maxProblems` code problems across the response. Aggregate/per-file `problemsTruncated` flags known omissions; per-file `problemCount` counts only returned problems. Re-query a truncated path with `file`, narrowing `startLine`/`endLine` if needed.
+**Notes**: File paths preserve literal leading/trailing whitespace. Single-file mode keeps legacy top-level metadata and supports intentions/range filters. Multi-file entries use `analyzed`, `timed_out`, `failed`, `skipped` (not eligible), `not_analyzed` (not started before the shared deadline), or `not_found`; path resolution consumes the shared deadline, and aliases/duplicates are resolved once. Open files use fresh daemon highlights; closed files use public batch analysis. The complete single-file operation is timeout-bounded too, including refresh, PSI setup, and analysis-lock waits. A daemon that reports it did not run can fall back to batch analysis within the remaining budget; a daemon that consumes the timeout does not start a second batch budget.
 **Severity levels**: `ERROR`, `WARNING`, `WEAK_WARNING`
 
 ### ide_project_diagnostics (disabled by default)

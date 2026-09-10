@@ -33,6 +33,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.LocalFileSystem
 import java.io.File
+import java.io.IOException
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiDocumentManager
@@ -414,12 +415,26 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
             return localFileSystem.refreshAndFindFileByPath(canonicalPath)
         }
 
-        // Absolute paths are validated against project roots before resolving
-        if (relativePath.startsWith("/") || relativePath.startsWith("\\")) {
-            val canonical = File(relativePath).canonicalPath
+        fun canonicalPathOrNull(file: File): String? = try {
+            file.canonicalPath
+        } catch (_: IOException) {
+            null
+        } catch (_: SecurityException) {
+            null
+        }
+
+        fun isWithinRoot(canonicalPath: String, rootPath: String): Boolean =
+            canonicalPath.startsWith(rootPath + File.separator)
+
+        // Absolute paths are validated against project roots before resolving.
+        val requestedFile = File(relativePath)
+        val hasAbsoluteSyntax = requestedFile.isAbsolute ||
+            relativePath.startsWith('/') || relativePath.startsWith('\\')
+        if (hasAbsoluteSyntax) {
+            val canonical = canonicalPathOrNull(requestedFile) ?: return null
             val projectRoots = listOfNotNull(project.basePath) + ProjectUtils.getModuleContentRoots(project)
             val withinProject = projectRoots.any { root ->
-                canonical.startsWith(File(root).canonicalPath + File.separator)
+                canonicalPathOrNull(File(root))?.let { isWithinRoot(canonical, it) } == true
             }
             if (!withinProject) return null
             return findOrRefresh(canonical)
@@ -428,8 +443,9 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         // Try project basePath first
         val basePath = project.basePath
         if (basePath != null) {
-            val canonical = File(basePath, relativePath).canonicalPath
-            if (canonical.startsWith(File(basePath).canonicalPath + File.separator)) {
+            val canonical = canonicalPathOrNull(File(basePath, relativePath))
+            val canonicalBase = canonicalPathOrNull(File(basePath))
+            if (canonical != null && canonicalBase != null && isWithinRoot(canonical, canonicalBase)) {
                 val file = findOrRefresh(canonical)
                 if (file != null) return file
             }
@@ -438,8 +454,9 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         // Try module content roots (workspace sub-project support)
         for (rootPath in ProjectUtils.getModuleContentRoots(project)) {
             if (rootPath != basePath) {
-                val canonical = File(rootPath, relativePath).canonicalPath
-                if (canonical.startsWith(File(rootPath).canonicalPath + File.separator)) {
+                val canonical = canonicalPathOrNull(File(rootPath, relativePath))
+                val canonicalRoot = canonicalPathOrNull(File(rootPath))
+                if (canonical != null && canonicalRoot != null && isWithinRoot(canonical, canonicalRoot)) {
                     val file = findOrRefresh(canonical)
                     if (file != null) return file
                 }
