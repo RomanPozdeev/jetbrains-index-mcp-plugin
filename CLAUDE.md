@@ -273,6 +273,12 @@ TypeScript SDK), and the stateless Streamable HTTP transport cannot send keep-al
 notifications (kotlin-sdk 0.10.0 drops them in JSON response mode). **No tool call may ever
 block past ~45–55s** — a longer operation must long-poll (issue #277).
 
+`McpToolDispatcher` gives ordinary tool execution a 55-second coroutine deadline and reports
+expiry as an actionable tool error. The three long-poll tools retain their own budgets so their
+operation IDs are not lost. Cancellation remains cooperative: use cancellable EDT dispatch and
+`cancellableBlockingAction` for interruptible blocking analysis with a platform progress indicator.
+An already-running write is not rolled back on timeout; callers must inspect it before retrying.
+
 Shared infrastructure (used by `ide_run_tests`, `ide_build_project`, and `ide_project_diagnostics`):
 - `tools/LongPoll.kt` — the per-call wait-budget policy: `waitSeconds` parameter, default 45,
   ceiling 55.
@@ -395,7 +401,7 @@ Three tiers, selected by class-name suffix:
      schema into `src/test/resources/contract/tool-manifest.json`. This is the regression net
      for large refactors: one assertion covers every registered tool × every schema property, so
      a dropped `register(...)` call or a mutated parameter type fails here instead of shipping.
-     Scope: 49 of the 52 tools in `ToolNames.ALL` (the three needing the Kotlin or Maven plugin
+     Scope: 51 of the 54 tools in `ToolNames.ALL` (the three needing the Kotlin or Maven plugin
      are covered by set-equality instead), and **inputs only**.
    - `ResultShapeContractUnitTest` snapshots the other half of the client contract — the response
      side — into `src/test/resources/contract/result-shapes.txt`: the wire key set, JSON value
@@ -428,6 +434,10 @@ breaking changes the release notes owe clients.
 Both commands intentionally **exit non-zero** after writing the golden file, so `BUILD FAILED`
 there is expected. Re-run without the flag to confirm green.
 
+Search cursors with exact pointers may return `stale=true` after PSI edits. Preserve project/session
+ownership checks and rebind only surviving pointers; a deleted pointer requires re-search, never
+coordinate-based identity recovery.
+
 ### Test-only platform dependencies
 
 `build.gradle.kts` declares two things purely so tests can run; neither affects the shipped
@@ -438,6 +448,14 @@ plugin:
   (the Java plugin declares that extension point but ships no implementations), so
   `ide_list_tests` could only ever answer "No test frameworks are registered" and would be
   untestable.
+
+`-PkotlinPluginTests=true` additionally loads the bundled Kotlin plugin and the sources under
+`src/kotlinPluginTest/kotlin`, including `KotlinReplaceMemberFormattingBehaviorTest`,
+`KotlinRenameBaseBehaviorTest`, `KotlinChangeSignatureBehaviorTest`, and
+`KotlinSymbolInfoBehaviorTest`.
+The plugin's newer metadata is excluded from test compilation;
+the test runtime uses the IDE's stdlib to avoid shadowing it with Gradle's older Kotlin dependency.
+See CONTRIBUTING.md for the command and remaining Kotlin coverage limits.
 
 `gradle.properties` also adds `JavaScript` to `platformBundledPlugins`. That one is *not*
 test-only in form — it is a compile/test classpath entry — but it does not change what the plugin
@@ -502,7 +520,7 @@ Tools are organized by IDE availability.
 - `ide_find_symbol` - Search for symbols (classes, methods, fields, functions) by name with IntelliJ Go to Symbol matching (disabled by default)
 - `ide_search_text` - Text search using IntelliJ Find in Files with context filtering (substring matching for plain text, regex matching when enabled). Optional `paths` restricts the search to project-relative globs (`!` prefix excludes)
 - `ide_read_file` - Read file content by path or qualified name, including library/jar sources (disabled by default)
-- `ide_diagnostics` - Unified diagnostics tool: per-file code analysis (errors, warnings, intentions), build output from last build, and test results from open test run tabs. Supports `includeBuildErrors`, `includeTestResults`, `severity` filter, `testResultFilter`, `maxBuildErrors`, `maxTestResults`. The `file` parameter is now optional. The result's `analysisMode` reports which path produced file problems: `open_daemon` or `closed_batch`. The analyzed file is refreshed from disk and committed to PSI first, so an out-of-band edit is analyzed as written without an `ide_sync_files` call.
+- `ide_diagnostics` - Unified diagnostics tool: per-file code analysis (errors, warnings, intentions), build output from last build, and test results from open test run tabs. Supports one `file` or up to 100 unique `files` under a shared timeout budget, plus `includeBuildErrors`, `includeTestResults`, `severity`, `testResultFilter`, `maxBuildErrors`, and `maxTestResults`. The result's `analysisMode` reports which path produced single-file problems (`open_daemon` or `closed_batch`); multi-file calls use `fileAnalyses`. The analyzed files are refreshed from disk and committed to PSI first, so an out-of-band edit is analyzed as written without an `ide_sync_files` call.
 - `ide_project_diagnostics` - Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata (issue #246): every file in scope gets exactly one state (`analyzed`/`timed_out`/`failed`/`skipped`/`not_analyzed`) and `complete` is true only when every considered file was analyzed, so an empty problems list can never be mistaken for a clean project. Reuses the per-file analysis engine (open files get daemon highlights, closed files the public batch pass). Long analyses long-poll via `analysisId` (same pattern as `ide_build_project`); one analysis per project at a time. (disabled by default)
 - `ide_index_status` - Check indexing status (dumb/smart mode)
 - `ide_sync_files` - Force sync IDE's virtual file system and PSI cache with external file changes
@@ -511,7 +529,7 @@ Tools are organized by IDE availability.
 - `ide_import_modules` - Import external Maven project directories as modules into the current IntelliJ window for cross-project code intelligence and refactoring. Already imported module roots are skipped. Requires Maven plugin. (disabled by default)
 - `ide_open_workspace` - Scan a root directory for Maven projects and open them all in one IntelliJ window with full cross-project code intelligence, or provide an explicit list of Maven project paths via `modules`. `path` and `modules` are mutually exclusive; `modules` uses SHA-based caching. Creates a temporary aggregator POM with relative module paths. Requires Maven plugin. (disabled by default)
 - `ide_build_project` - Build project using IDE's build system (JPS, Gradle, Maven, CMake (CLion)). Returns structured errors/warnings with file locations when available (null counts = no messages captured, not 0). Uses CompilationStatusListener for JPS builds, BuildProgressListener (BuildViewManager) for Gradle/Maven builds, and for CLion — whose CMake builds bypass both — the cidr build-finished topic plus the build log from the Messages tool window, parsed for MSVC/Clang/CMake diagnostics. Supports workspace sub-project targeting via `project_path`. Each call blocks at most `waitSeconds` (default 45): a still-running call returns `{"status": "running", "buildId": ...}` and the agent polls with `buildId` while the build continues in the IDE. (disabled by default)
-- `ide_change_signature` - Change method signature (name, return type, visibility, parameters) with automatic caller updates using IntelliJ's Change Signature refactoring. Java only. (disabled by default)
+- `ide_change_signature` - Change method signature (name, return type, visibility, parameters) with automatic caller updates using IntelliJ's Change Signature refactoring. Java methods and Kotlin JVM functions; Kotlin position/handle targets resolve to the base declaration for override changes. (disabled by default)
 - `ide_create_file` - Create a new source file with content, immediately indexed by IntelliJ. Created through IntelliJ's VFS, instantly available for all IDE tools without needing `ide_sync_files`. Use instead of Write for `.java`, `.kt`, `.ts`, `.tsx`, `.py` files. File must not already exist. (disabled by default)
 - `ide_replace_text_in_file` - Find and replace text in a file using IntelliJ's Document API. Plain text or regex replacement through IntelliJ's document model, so changes are immediately visible to index, PSI, and all other IDE tools without needing `ide_sync_files`. (disabled by default)
 - `ide_run_tests` - Run tests via the IDE's run configuration infrastructure. `target` accepts an existing run config name (works for any language/framework) or a Java/Kotlin class/method FQN (`com.example.MyTest` / `com.example.MyTest#testFoo`). **Creating a config from an FQN is Java/Kotlin-only** — for Python/JS/TS/Go/PHP/Rust, pass an existing run-config name. Results are read directly from the IDE's test runner (any Service-Message-based framework: JUnit, TestNG, pytest, Jest, Go test, PHPUnit), returning structured pass/fail/error counts, exit code, per-test results, and console output (each test's own prints on its entry, unattributed framework/suite output on the result's `output` field; stdout/stderr merged in print order, ANSI stripped, system messages excluded, size-budgeted). Each call blocks at most `waitSeconds` (default 45) so the MCP client's request timeout is never hit: a still-running call — including one whose pre-test build is still compiling, in which case the test process has not started yet — returns `{"status": "running", "runId": ...}` and the agent polls with `runId` while the run (bounded by `timeoutSeconds` counted from process start, enforced by a registry watchdog) continues in the IDE. By default the run does not activate (pop open) the Run tool window; pass `activateToolWindow: true` to open it. (disabled by default)
@@ -628,6 +646,91 @@ The plugin supports cursor-based pagination for search tools that return flat re
 **Schema:** All parameters are optional in the schema (no `required` array) because the Anthropic API does not support `anyOf`/`oneOf` at the top level. Validation is done at runtime — if `cursor` is absent, the tool checks for its required search params and returns an error if missing.
 
 **Backward compatibility:** Old `limit`/`maxResults` parameters work as aliases for `pageSize`. Legacy cursors (without embedded pageSize) are still decodable but require an explicit `pageSize` parameter.
+
+### Opaque Symbol IDs
+
+Semantic discovery results carry a `symbolId` backed by a server-side
+`SmartPsiElementPointer`. The token itself is opaque and contains no path, offset, name, or
+project data. Prefer it to coordinates when chaining `ide_find_references`,
+`ide_find_definition`, `ide_symbol_info`, hierarchy/implementation tools, and symbol-oriented
+refactorings; it disambiguates overloads and local declarations and follows ordinary source
+movement.
+
+The ID is deliberately a non-canonical session handle: binding one PSI declaration more than once
+may yield several unequal handles that are all valid simultaneously. Never use ID equality as
+symbol equality. Reusing one concrete handle remains stable across line shifts and rename while it
+is still inside the session/project/TTL/LRU bounds.
+
+`SymbolIdRegistry` is an application service owned by the running MCP server generation. It is
+access-order LRU bounded (4,096 entries), expires entries after one hour of inactivity, keys them
+to the exact `Project` object identity, and is cleared on MCP server stop/restart. It stores no
+fallback query. A missing, evicted, wrong-project, deleted, or otherwise unrestorable pointer must
+return `SYMBOL_ID_EXPIRED` — never resolve by saved coordinates or choose a nearby PSI element.
+Keep lookup O(1) without promoting rejected lookups. Successful access promotes entries;
+expiry work is amortized rather than scanning all handles on every bind. Both symbol and hierarchy
+registries sweep every five minutes and remove closed-project state through lifecycle listeners.
+Maintain lock order `McpServerEpoch` then registry monitor; maintenance/stats must never invert it.
+After a successful symbol refactoring, return `updatedSymbol` with current metadata and the same
+ID when it can be rebound (otherwise a new ID); safe delete returns `invalidatedSymbolId`.
+Full member replacement must validate a single declaration in a nonphysical PSI copy before
+editing, then rebind only the exact committed replacement. Never restore an ID from the old
+offset or a containing declaration; invalidate it if exact post-edit restoration fails.
+
+Target-aware semantic/refactoring tools additionally accept exactly one nested `target` variant:
+`{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`. Runtime normalization
+maps it to the legacy selectors; nested and top-level selectors must not be mixed. The dispatcher
+must inspect `target.symbolId` when routing a request to an owning project. Keep legacy top-level
+selectors for compatibility.
+
+After a plugin install/update and IDE reload, reconnect or restart the MCP client. Clients such as
+Codex cache `ALL_TOOLS`; an existing connection can therefore retain old schemas. Keep
+`ServerCapabilities.Tools.listChanged=false` until every server transport can actually publish and
+serve tool-list change notifications.
+
+Refactoring preview is one shared wire contract for rename, safe delete, and change signature.
+With `dryRun=true`, perform target resolution, validation, usage/conflict discovery, and affected
+file estimation, then return `RefactoringPreviewResult`. Do not enter the refactoring/source-write
+phase, call document save APIs, run the mutating processor phase, or register an undo command.
+Tests must compare every fixture file byte-for-byte before and after the preview.
+Headless rename previews collect the same automatic selections and usages as apply through public
+APIs; shared response normalization lives in `refactoringPreview`.
+
+Legacy hierarchy requests without `maxNodes`/`cursor` use recursive language handlers and preserve
+nested `children`/`supertypes` plus their original per-handler limits. Explicit `maxNodes` opts into
+bounded BFS owned by the tools: ask handlers for direct neighbors and enforce the limit while
+returning/expanding nodes. Continuation pages default to 100 nodes (maximum 500).
+Paged nodes carry traversal-local `nodeId`, `parentId`, and `depth`, describing the first-discovery
+parent; these IDs are independent of non-canonical symbol handles. Type pages also expose the exact
+combined direction order through `traversal`, with `supertypes`/`subtypes` as filtered views.
+
+Continuations keep exact smart-pointer identity in persistent history shared between snapshots.
+Do not silently drop history or undisclosed results. On retention-budget exhaustion, return the
+computed page with `truncated=true`, `hasMore=true`, no cursor and `truncationReason` explaining how
+to narrow the query. Session/ownership failures still fail the request. The independent cache keeps
+128 snapshots, ten per traversal, with ten-minute idle TTL; aggregate retention weights are
+163,840 pointer slots and 10,240,000 text characters. Eviction favors old replay snapshots over
+current frontiers. Rebind every disclosed handle on every page, even unchanged PSI/retries, and
+avoid allocating handles for undisclosed nodes. Stateless HTTP progress is page metadata.
+
+`ide_diagnostics` keeps the single-`file` response compatible and accepts up to 100 unique `files`
+as an exclusive alternative. A multi-file request has one shared deadline, one aggregate `problems` list, and one
+`FileDiagnosticsAnalysis` per requested path. Code problems share a 100-item response cap: collect
+one extra matching problem as lookahead, expose aggregate/per-file `problemsTruncated`, and report
+per-file returned `problemCount`. Probe even files reached after the cap so hidden problems are
+explicit; freshness and timeouts are independent of output truncation. Location/intention fields
+remain single-file only; build/test-only legacy calls continue to ignore location arguments.
+For targeted VFS sync, validate the whole batch inside the selected base/content root before
+refreshing anything. A deleted target already known to VFS refreshes its nearest existing parent; reject unknown missing paths. Expose requested,
+actually refreshed, and deleted paths separately, and reject traversal/absolute/symlink escapes.
+
+`ide_file_structure.structure` is compatibility output and must remain. Build `nodes` from the
+exact extracted PSI elements and bind `symbolId` there; never reconstruct node identity from a line
+number. Preserve the complete outline but bind at most `MAX_PAGE_SIZE` (500) eligible nodes in
+preorder per response, reporting `symbolIdsTruncated` and `symbolIdsOmitted`. Kotlin class kind comes
+from semantic Kt PSI flags (`INTERFACE`, `CLASS`, `ENUM`,
+`ANNOTATION`, `OBJECT`), and qualified names go through `PsiUtils.qualifiedName`. Anonymous
+implementations use `<anonymous implementation of Base at File.kt:line>` and keep
+`qualifiedName=null`.
 
 ### Search Collection Pattern (Processor)
 

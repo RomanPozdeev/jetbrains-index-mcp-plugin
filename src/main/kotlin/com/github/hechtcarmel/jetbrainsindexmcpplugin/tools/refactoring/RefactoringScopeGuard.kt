@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ConflictMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
@@ -7,10 +8,16 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Ref
 import com.intellij.openapi.util.ThrowableComputable
+import com.intellij.psi.PsiElement
 import com.intellij.refactoring.BaseRefactoringProcessor
 import com.intellij.refactoring.RefactoringBundle
+import com.intellij.refactoring.RefactoringImpl
+import com.intellij.refactoring.rename.RenameUtil
 import com.intellij.usageView.UsageInfo
+import com.intellij.util.containers.MultiMap
+import java.lang.reflect.InvocationTargetException
 
 /**
  * Pre-flight writability check for the *full* refactoring scope (issue #310).
@@ -30,6 +37,18 @@ import com.intellij.usageView.UsageInfo
  */
 internal object RefactoringScopeGuard {
     private val LOG = Logger.getInstance(RefactoringScopeGuard::class.java)
+
+    /**
+     * The outcome of change-signature conflict discovery.
+     *
+     * [usages] is intentionally the value left in the extension-owned `Ref`, rather than the
+     * input array: a [com.intellij.refactoring.changeSignature.ChangeSignatureUsageProcessor]
+     * may filter or replace usages while collecting conflicts.
+     */
+    internal data class ChangeSignatureConflictResult(
+        val usages: Array<UsageInfo>,
+        val conflicts: List<String>
+    )
 
     /**
      * Runs the pre-check usage search off the EDT.
@@ -67,6 +86,25 @@ internal object RefactoringScopeGuard {
         }
     }
 
+    /**
+     * Preview variant of [computeUsagesOffEdt]. Cancellation and discovery failures propagate:
+     * a dry-run must never turn an incomplete search into an apparently safe zero-usage plan.
+     */
+    fun computeUsagesOffEdtStrict(project: Project, findUsages: () -> Array<UsageInfo>): Array<UsageInfo> {
+        if (!ApplicationManager.getApplication().isDispatchThread) {
+            return ReadAction.compute<Array<UsageInfo>, RuntimeException> { findUsages() }
+        }
+        val search = ThrowableComputable<Array<UsageInfo>, RuntimeException> {
+            ReadAction.compute<Array<UsageInfo>, RuntimeException> { findUsages() }
+        }
+        return ProgressManager.getInstance().runProcessWithProgressSynchronously(
+            search,
+            RefactoringBundle.message("progress.text"),
+            true,
+            project
+        )
+    }
+
     /** Relative paths of read-only files among the usages' containing files. */
     fun readOnlyFilesIn(project: Project, usages: Array<UsageInfo>): List<String> =
         usages.asSequence()
@@ -78,31 +116,56 @@ internal object RefactoringScopeGuard {
             .sorted()
             .toList()
 
+    /** Uses the platform's public refactoring facade; discovery failures propagate. */
+    fun findUsages(processor: BaseRefactoringProcessor): Array<UsageInfo> =
+        object : RefactoringImpl<BaseRefactoringProcessor>(processor) {}.findUsages()
+
     /**
-     * Invokes the processor's `findUsages()` reflectively. `BaseRefactoringProcessor`
-     * declares it protected and some subclasses (e.g. `ChangeSignatureProcessorBase`)
-     * keep it that way. Returns null when reflection fails — callers fail open,
-     * keeping the tool functional at the cost of the pre-check.
+     * Runs the conflict collectors used by Java change-signature processors.
+     * Reflection keeps the Java plugin optional, while a missing or changed API is surfaced to
+     * the caller so preview can report `canApply=false` instead of silently assuming no conflicts.
+     *
+     * Must be called on EDT without an enclosing read action. The platform method delegates its
+     * extension work through `ActionUtil.underModalProgress`; invoking it under a read lock can
+     * deadlock when the modal worker needs PSI access.
      */
-    fun findUsagesReflectively(processor: BaseRefactoringProcessor): Array<UsageInfo>? {
-        return try {
-            var cls: Class<*>? = processor.javaClass
-            while (cls != null) {
-                val method = try {
-                    cls.getDeclaredMethod("findUsages")
-                } catch (_: NoSuchMethodException) {
-                    cls = cls.superclass
-                    continue
-                }
-                method.isAccessible = true
-                @Suppress("UNCHECKED_CAST")
-                return method.invoke(processor) as? Array<UsageInfo>
+    fun collectChangeSignatureConflictsReflectively(
+        changeInfo: Any,
+        usages: Array<UsageInfo>
+    ): ChangeSignatureConflictResult {
+        ApplicationManager.getApplication().assertIsDispatchThread()
+        val conflicts = MultiMap<PsiElement, String>()
+        val usagesRef = Ref.create(usages.copyOf())
+        val changeInfoClass = Class.forName("com.intellij.refactoring.changeSignature.ChangeInfo")
+        val processorBaseClass = Class.forName(
+            "com.intellij.refactoring.changeSignature.ChangeSignatureProcessorBase"
+        )
+        val method = processorBaseClass.getMethod(
+            "collectConflictsFromExtensions",
+            Ref::class.java,
+            MultiMap::class.java,
+            changeInfoClass
+        )
+        try {
+            method.invoke(null, usagesRef, conflicts, changeInfo)
+        } catch (e: InvocationTargetException) {
+            val cause = e.cause ?: e
+            when (cause) {
+                is ProcessCanceledException -> throw cause
+                is RuntimeException -> throw cause
+                else -> throw IllegalStateException(cause.message ?: "Conflict discovery failed", cause)
             }
-            null
-        } catch (e: Exception) {
-            LOG.warn("Read-only scope pre-check skipped — findUsages() reflection failed: ${e.message}")
-            null
         }
+        // Java's processor snapshots the usage set before conflict extensions run, then restores
+        // that set for apply. A replacement of this Ref affects conflict discovery only; using
+        // it as the edit scope would hide callers that the real processor will still rewrite.
+        ReadAction.run<RuntimeException> {
+            RenameUtil.addConflictDescriptions(usages, conflicts)
+        }
+        return ChangeSignatureConflictResult(
+            usages = usages,
+            conflicts = ConflictMessages.sanitizeAll(conflicts.values()).distinct()
+        )
     }
 
     /** Builds the error message for a scope blocked by [readOnlyFiles]. */

@@ -1,19 +1,25 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.UnifiedTargetArguments
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.RefactoringResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.schema.SchemaBuilder
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ConflictMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
 import com.intellij.lang.LanguageNamesValidation
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
+import com.intellij.openapi.util.ThrowableComputable
 import com.intellij.psi.*
 import com.intellij.psi.impl.source.resolve.reference.impl.providers.FileReference
 import com.intellij.psi.util.PsiTreeUtil
@@ -22,13 +28,20 @@ import com.intellij.refactoring.rename.RenamePsiElementProcessor
 import com.intellij.refactoring.rename.naming.AutomaticRenamerFactory
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.ReferencesSearch
+import com.intellij.usageView.UsageInfo
 import com.intellij.util.Processor
 import com.intellij.util.containers.MultiMap
+import com.intellij.openapi.progress.ProcessCanceledException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import java.lang.reflect.InvocationTargetException
 
 /**
  * Universal rename tool that works across all languages supported by JetBrains IDEs.
@@ -47,6 +60,8 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 class RenameSymbolTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     companion object {
         private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(RenameSymbolTool::class.java)
 
@@ -61,6 +76,8 @@ class RenameSymbolTool : AbstractMcpTool() {
         internal sealed class RenameModeDecision {
             data object FileRenameMode : RenameModeDecision()
             data class SymbolRenameMode(val line: Int, val column: Int) : RenameModeDecision()
+            data class SymbolIdRenameMode(val symbolId: String) : RenameModeDecision()
+            data object QualifiedSymbolRenameMode : RenameModeDecision()
             data class InvalidRenameMode(val error: String) : RenameModeDecision()
         }
 
@@ -101,6 +118,51 @@ class RenameSymbolTool : AbstractMcpTool() {
 
         internal fun resolveRenameMode(arguments: JsonObject): RenameModeDecision {
             val targetType = arguments[ParamNames.TARGET_TYPE_CAMEL]?.jsonPrimitive?.content
+            if (
+                targetType == "file" &&
+                arguments[UnifiedTargetArguments.NORMALIZED_VARIANT]?.jsonPrimitive?.content == UnifiedTargetArguments.POSITION
+            ) {
+                return RenameModeDecision.InvalidRenameMode(
+                    "target.position selects a symbol and cannot be combined with targetType='file'"
+                )
+            }
+            val symbolId = (arguments[ParamNames.SYMBOL_ID] as? JsonPrimitive)
+                ?.takeIf { it.isString }
+                ?.content
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+            if (symbolId != null) {
+                val hasFile = (arguments[ParamNames.FILE] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                    ?.isNotBlank() == true
+                val hasCoordinates = hasNonNullValue(arguments[ParamNames.LINE]) ||
+                    hasNonNullValue(arguments[ParamNames.COLUMN])
+                return if (targetType == "file" || hasFile || hasCoordinates) {
+                    RenameModeDecision.InvalidRenameMode(ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE)
+                } else if (targetType == null || targetType == "symbol") {
+                    RenameModeDecision.SymbolIdRenameMode(symbolId)
+                } else {
+                    RenameModeDecision.InvalidRenameMode("Invalid targetType: '$targetType'. Must be 'symbol' or 'file'.")
+                }
+            }
+            val hasQualifiedSelector = hasNonBlankString(arguments[ParamNames.LANGUAGE]) ||
+                hasNonBlankString(arguments[ParamNames.SYMBOL])
+            if (hasQualifiedSelector) {
+                val hasFile = (arguments[ParamNames.FILE] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                    ?.isNotBlank() == true
+                val hasCoordinates = hasNonNullValue(arguments[ParamNames.LINE]) ||
+                    hasNonNullValue(arguments[ParamNames.COLUMN])
+                return if (targetType == "file" || hasFile || hasCoordinates) {
+                    RenameModeDecision.InvalidRenameMode(ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE)
+                } else if (targetType == null || targetType == "symbol") {
+                    RenameModeDecision.QualifiedSymbolRenameMode
+                } else {
+                    RenameModeDecision.InvalidRenameMode("Invalid targetType: '$targetType'. Must be 'symbol' or 'file'.")
+                }
+            }
             return when (targetType) {
                 "file" -> RenameModeDecision.FileRenameMode
                 "symbol" -> resolveRenameMode(
@@ -135,13 +197,18 @@ class RenameSymbolTool : AbstractMcpTool() {
         private fun readCoordinateValue(value: JsonElement?): CoordinateRead {
             return try {
                 when (value) {
-                    null -> CoordinateRead.Missing
+                    null, JsonNull -> CoordinateRead.Missing
                     else -> CoordinateRead.Present(value.jsonPrimitive.int)
                 }
             } catch (_: Exception) {
                 CoordinateRead.Invalid
             }
         }
+
+        private fun hasNonBlankString(value: JsonElement?): Boolean =
+            (value as? JsonPrimitive)?.takeIf { it.isString }?.content?.isNotBlank() == true
+
+        private fun hasNonNullValue(value: JsonElement?): Boolean = value != null && value != JsonNull
 
         /** Exposed for testing — builds the error message returned when the target is a compiled element. */
         fun buildCompiledElementErrorMessage(elementName: String?, path: String): String =
@@ -159,42 +226,40 @@ class RenameSymbolTool : AbstractMcpTool() {
     @org.jetbrains.annotations.TestOnly
     internal var processorRunHook: (() -> Unit)? = null
 
+    /** Lets behavior tests prove that an incomplete preview search fails closed. */
+    @org.jetbrains.annotations.TestOnly
+    internal var previewUsageSearchHook: (() -> Unit)? = null
+
+    /** Lets behavior tests verify that cancellation from deep-super resolution is not swallowed. */
+    @org.jetbrains.annotations.TestOnly
+    internal var deepestSuperMethodResolutionHook: ((PsiNamedElement) -> PsiNamedElement?)? = null
+
+    /** Kotlin auto-confirms the super-method chooser in tests; observe entry into that UI path. */
+    @org.jetbrains.annotations.TestOnly
+    internal var interactiveTargetSelectionHook: (() -> Unit)? = null
+
     override val name = "ide_refactor_rename"
 
     override val description = """
-        Rename a symbol or file and update all references across the project. Use instead of find-and-replace for safe, semantic renaming that handles all usages correctly. Supports undo (Ctrl+Z).
+        Rename a symbol or file and update references semantically across the project. Supports undo.
+        Supply newName and a symbol target (symbolId, position, or language+symbol), or file for file rename.
+        targetType="file" ignores placeholder coordinates and supports binary/Android resource files, updating resource references. Include the extension in newName.
+        Without targetType, omitted/null line+column selects file rename; both coordinates select a symbol.
 
-        Two modes:
-        - **Symbol rename** (`targetType="symbol"`, file + line + column + newName): Rename a symbol at a specific position. `line` and `column` are 1-based and must be provided.
-        - **File rename** (`targetType="file"`, file + newName): Rename the file itself. Any placeholder `line`/`column` values are ignored for mode selection. Works for all file types including binary files (images, etc.). Especially useful for Android resource files (.webp, .png, .xml in res/) where it updates all resource references across the project.
+        overrideStrategy: rename_base (default) includes base and overrides; rename_only_current limits to this declaration; ask opens an IDE chooser.
+        relatedRenamingStrategy: all (default), none, accessors_and_tests, or ask. Related elements can include accessors, parameters/fields, tests, variables and inheritors.
+        dryRun=true returns the planned changes, affected files, usages, conflicts and canApply without editing. Interactive ask strategies cannot produce an applicable headless preview.
+        Apply returns affected files and change count.
 
-        Backward compatibility: if `targetType` is omitted, null/null line+column still means file rename; provided line+column still means symbol rename.
-
-        Automatically renames related elements: getters/setters, overriding methods, constructor parameters ↔ fields, test classes.
-
-        When renaming a method that overrides a base method, the `overrideStrategy` parameter controls behavior:
-        - "rename_base" (default): Automatically renames the base method and all overrides. No dialog shown.
-        - "rename_only_current": Renames only the current method, leaving the base and other overrides unchanged.
-        - "ask": Shows the IDE's built-in dialog to let the user choose interactively.
-
-        The `relatedRenamingStrategy` parameter controls automatic renaming of related symbols (e.g., same-named properties on unrelated classes, getters/setters, test classes, variables):
-        - "all" (default): Automatically rename all related symbols. Current behavior.
-        - "none": Rename only the targeted symbol. Skip all automatic related renames.
-        - "accessors_and_tests": Only rename getters/setters and test classes/methods. Skip variables, inheritors, overloads, and parameters on unrelated classes.
-        - "ask": Show the IDE dialog for each related rename for interactive choice.
-
-        Returns: affected files list and change count. Modifies source files.
-
-        Parameters: file + newName (required). targetType is optional; line + column are only needed for symbol rename. overrideStrategy + relatedRenamingStrategy (optional).
-
-        Examples:
-        - Symbol rename: {"file": "src/UserService.java", "targetType": "symbol", "line": 15, "column": 18, "newName": "CustomerService"}
-        - File rename: {"file": "res/mipmap-hdpi/ic_launcher.webp", "targetType": "file", "newName": "ic_app_icon.webp"}
+        Example: {"file":"src/UserService.java","line":15,"column":18,"newName":"CustomerService"}
     """.trimIndent()
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
-        .file(description = "Path to file relative to project root. REQUIRED.")
+        .target()
+        .symbolId()
+        .languageAndSymbol(required = false)
+        .file(required = false, description = "Path to file relative to project root. Required for file rename or position-based symbol rename; omit when symbolId is used.")
         .enumProperty(
             ParamNames.TARGET_TYPE_CAMEL,
             "What to rename: 'symbol' (requires 1-based line+column) or 'file' (renames the file itself and ignores placeholder line/column values). If omitted, legacy behavior applies.",
@@ -220,6 +285,10 @@ class RenameSymbolTool : AbstractMcpTool() {
                 "'ask': show the IDE dialog for each related rename for interactive choice.",
             listOf("all", "none", "accessors_and_tests", "ask")
         )
+        .booleanProperty(
+            ParamNames.DRY_RUN,
+            "Resolve and validate the target, then discover usages/conflicts without modifying files. Default: false."
+        )
         .build()
 
     /**
@@ -229,7 +298,8 @@ class RenameSymbolTool : AbstractMcpTool() {
         val element: PsiNamedElement,
         val oldName: String,
         val error: String? = null,
-        val newNameOverride: String? = null
+        val newNameOverride: String? = null,
+        val previewDiscoveryWarnings: List<String> = emptyList()
     )
 
     private data class JsTsFileRenameRetargeting(
@@ -249,13 +319,19 @@ class RenameSymbolTool : AbstractMcpTool() {
         val affectedFilesCount: Int,
         val relatedRenamesCount: Int,
         val warnings: List<String>?,
-        val unretargetedImporters: List<String>?
+        val unretargetedImporters: List<String>?,
+        val renamedElementPointer: SmartPsiElementPointer<PsiNamedElement>
+    )
+
+    private data class RenamePreviewSetup(
+        val targetElement: PsiNamedElement,
+        val effectiveNewName: String,
+        val processor: HeadlessRenameProcessor
     )
 
     override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
-        val file = requiredStringArg(arguments, "file").getOrElse {
-            return createErrorResult(it.message ?: "Missing required parameter: file")
-        }
+        val startedAtNanos = System.nanoTime()
+        val dryRun = arguments[ParamNames.DRY_RUN]?.jsonPrimitive?.booleanOrNull == true
         val newName = arguments["newName"]?.jsonPrimitive?.content
             ?: return createErrorResult("Missing required parameter: newName")
 
@@ -281,6 +357,12 @@ class RenameSymbolTool : AbstractMcpTool() {
             is RenameModeDecision.SymbolRenameMode -> {
                 // continue
             }
+            is RenameModeDecision.SymbolIdRenameMode -> {
+                // continue
+            }
+            RenameModeDecision.QualifiedSymbolRenameMode -> {
+                // continue
+            }
             is RenameModeDecision.InvalidRenameMode -> {
                 return createErrorResult(renameMode.error)
             }
@@ -292,11 +374,57 @@ class RenameSymbolTool : AbstractMcpTool() {
         // PHASE 1: BACKGROUND - Find element and validate (suspending read action)
         // ═══════════════════════════════════════════════════════════════════════
         val validation = suspendingReadAction {
-            if (renameMode is RenameModeDecision.FileRenameMode) {
-                validateAndPrepareFileRename(project, file, newName)
-            } else {
-                val symbolMode = renameMode as RenameModeDecision.SymbolRenameMode
-                validateAndPrepare(project, file, symbolMode.line, symbolMode.column, newName)
+            when (renameMode) {
+                RenameModeDecision.FileRenameMode -> {
+                    val file = optionalStringArg(arguments, ParamNames.FILE)
+                        ?: return@suspendingReadAction RenameValidation(
+                            DummyNamedElement,
+                            "",
+                            "Missing required parameter: ${ParamNames.FILE}"
+                        )
+                    validateAndPrepareFileRename(
+                        project,
+                        file,
+                        newName,
+                        requireWritable = !dryRun,
+                        detectConflicts = !dryRun,
+                        failClosedOnDiscoveryError = dryRun
+                    )
+                }
+                is RenameModeDecision.SymbolRenameMode -> {
+                    val file = optionalStringArg(arguments, ParamNames.FILE)
+                        ?: return@suspendingReadAction RenameValidation(
+                            DummyNamedElement,
+                            "",
+                            "Missing required parameter: ${ParamNames.FILE}"
+                        )
+                    validateAndPrepare(
+                        project,
+                        file,
+                        renameMode.line,
+                        renameMode.column,
+                        newName,
+                        requireWritable = !dryRun,
+                        detectConflicts = !dryRun
+                    )
+                }
+                is RenameModeDecision.SymbolIdRenameMode ->
+                    validateAndPrepareBySemanticTarget(
+                        project,
+                        arguments,
+                        newName,
+                        requireWritable = !dryRun,
+                        detectConflicts = !dryRun
+                    )
+                RenameModeDecision.QualifiedSymbolRenameMode ->
+                    validateAndPrepareBySemanticTarget(
+                        project,
+                        arguments,
+                        newName,
+                        requireWritable = !dryRun,
+                        detectConflicts = !dryRun
+                    )
+                is RenameModeDecision.InvalidRenameMode -> error("Invalid rename mode already returned")
             }
         }
 
@@ -305,16 +433,40 @@ class RenameSymbolTool : AbstractMcpTool() {
         }
 
         val element = validation.element
+        val requestedPointer = suspendingReadAction {
+            SmartPointerManager.getInstance(project).createSmartPsiElementPointer(element)
+        }
         val oldName = validation.oldName
         val effectiveNewName = validation.newNameOverride ?: newName
-        val jsTsFileRetargeting = if (
-            renameMode is RenameModeDecision.FileRenameMode &&
-            element is PsiFile &&
-            shouldRetargetJsTsFileRenameSemantically(element.language.id, overrideStrategy)
-        ) {
-            suspendingReadAction { collectJsTsFileRenameRetargeting(element) }
-        } else {
-            null
+        // File/language metadata belongs to PSI too. Keep the entire preview/apply
+        // retargeting decision under the read action rather than reading it while this
+        // coroutine is otherwise unlocked.
+        val jsTsFileRetargeting = suspendingReadAction {
+            if (
+                renameMode is RenameModeDecision.FileRenameMode &&
+                element is PsiFile &&
+                shouldRetargetJsTsFileRenameSemantically(element.language.id, overrideStrategy)
+            ) {
+                collectJsTsFileRenameRetargeting(element)
+            } else {
+                null
+            }
+        }
+
+        if (dryRun) {
+            return previewRename(
+                project = project,
+                element = element,
+                oldName = oldName,
+                requestedNewName = effectiveNewName,
+                requestedFileName = newName.takeIf { renameMode is RenameModeDecision.FileRenameMode },
+                renameMode = renameMode,
+                overrideStrategy = overrideStrategy,
+                relatedRenamingStrategy = relatedRenamingStrategy,
+                jsTsFileRetargeting = jsTsFileRetargeting,
+                initialDiscoveryWarnings = validation.previewDiscoveryWarnings,
+                startedAtNanos = startedAtNanos
+            )
         }
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -352,6 +504,15 @@ class RenameSymbolTool : AbstractMcpTool() {
             createErrorResult("Rename failed: $errorMessage", ToolNames.DIAGNOSTICS)
         } else {
             val result = renameExecutionResult!!
+            val updatedSymbol = suspendingReadAction {
+                (requestedPointer.element ?: result.renamedElementPointer.element)?.let { renamedElement ->
+                    resolvedSymbolInfo(
+                        project,
+                        renamedElement,
+                        (renameMode as? RenameModeDecision.SymbolIdRenameMode)?.symbolId
+                    )
+                }
+            }
             val relatedNote = if (result.relatedRenamesCount > 0) {
                 " (also renamed ${result.relatedRenamesCount} related element(s))"
             } else ""
@@ -367,10 +528,197 @@ class RenameSymbolTool : AbstractMcpTool() {
                     changesCount = result.affectedFilesCount,
                     message = "Successfully renamed '$oldName' to '$effectiveNewName'$relatedNote$partialNote",
                     warnings = result.warnings,
-                    unretargetedImporters = result.unretargetedImporters
+                    unretargetedImporters = result.unretargetedImporters,
+                    updatedSymbol = updatedSymbol
                 )
             )
         }
+    }
+
+    private suspend fun previewRename(
+        project: Project,
+        element: PsiNamedElement,
+        oldName: String,
+        requestedNewName: String,
+        requestedFileName: String?,
+        renameMode: RenameModeDecision,
+        overrideStrategy: String,
+        relatedRenamingStrategy: String,
+        jsTsFileRetargeting: JsTsFileRenameRetargeting?,
+        initialDiscoveryWarnings: List<String>,
+        startedAtNanos: Long
+    ): CallToolResult {
+        val warnings = initialDiscoveryWarnings.toMutableList()
+        val affectedFiles = linkedSetOf<String>()
+        var usageCount = 0
+        var conflicts = emptyList<String>()
+        var discoveryComplete = initialDiscoveryWarnings.isEmpty()
+        var resolvedPreviewTarget: PsiNamedElement? = null
+
+        val (targetPath, targetWritable) = suspendingReadAction {
+            val targetFile = element.containingFile?.virtualFile
+            targetFile?.let { getRelativePath(project, it) } to (targetFile?.isWritable == true)
+        }
+        targetPath?.let(affectedFiles::add)
+        if (!targetWritable) {
+            warnings.add("Target file is read-only or unavailable; the rename cannot be applied.")
+        }
+
+        val exactInteractivePlan = overrideStrategy != "ask" && relatedRenamingStrategy != "ask"
+        if (overrideStrategy == "ask") {
+            warnings.add(
+                "overrideStrategy='ask' requires interactive target selection; " +
+                    "choose rename_base or rename_only_current for an applicable headless plan."
+            )
+        }
+        if (relatedRenamingStrategy == "ask") {
+            warnings.add(
+                "relatedRenamingStrategy='ask' requires interactive choices; " +
+                    "choose all, none, or accessors_and_tests for an applicable headless plan."
+            )
+        }
+
+        var plannedNewName = requestedNewName
+        try {
+            val setup = suspendingReadAction {
+                val targetElement = if (overrideStrategy == "ask") {
+                    resolveNonDialogSubstitution(element, failClosedOnDiscoveryError = true)
+                } else {
+                    resolveRenameTarget(element, overrideStrategy, failClosedOnDiscoveryError = true)
+                }
+                val effectiveNewName = computeEffectiveNewName(
+                    element,
+                    targetElement,
+                    requestedNewName,
+                    failClosedOnDiscoveryError = true
+                )
+                val processor = createConfiguredRenameProcessor(
+                    project = project,
+                    targetElement = targetElement,
+                    effectiveNewName = effectiveNewName,
+                    relatedRenamingStrategy = relatedRenamingStrategy,
+                    forceHeadless = true,
+                    failClosedOnDiscoveryError = true
+                ) as HeadlessRenameProcessor
+                RenamePreviewSetup(targetElement, effectiveNewName, processor)
+            }
+            resolvedPreviewTarget = setup.targetElement
+            plannedNewName = setup.effectiveNewName
+
+            // Prepare the same headless plan as apply. Language preparation runs on EDT without
+            // an outer read action; searches run off EDT. None of these steps mutates source.
+            edtAction { setup.processor.preparePreviewRenaming() }
+
+            previewUsageSearchHook?.invoke()
+            val directUsages = RefactoringScopeGuard.computeUsagesOffEdtStrict(project) {
+                setup.processor.findPreviewUsages()
+            }
+            edtAction { setup.processor.selectPreviewAutomaticRenames() }
+            val automaticUsages = RefactoringScopeGuard.computeUsagesOffEdtStrict(project) {
+                setup.processor.findPreviewAutomaticUsages()
+            }
+            val additionalRenames = edtAction { setup.processor.preparePreviewAutomaticRenames() }
+            val preparedUsages = RefactoringScopeGuard.computeUsagesOffEdtStrict(project) {
+                setup.processor.findPreviewPreparedUsages(additionalRenames)
+            }
+            val usages = (directUsages + automaticUsages + preparedUsages).distinct().toTypedArray()
+            usageCount = usages.size
+
+            val discovered = suspendingReadAction {
+                val files = linkedSetOf<String>()
+                val fileRenameConflicts = if (renameMode is RenameModeDecision.FileRenameMode) {
+                    val file = element.containingFile
+                    val sibling = file?.virtualFile?.parent?.findChild(requireNotNull(requestedFileName))
+                    if (sibling != null && sibling != file.virtualFile) {
+                        listOf("Cannot rename '${file.name}' to '$requestedFileName': a file or directory with that name already exists in its containing directory.")
+                    } else emptyList()
+                } else emptyList()
+                val renamedVirtualFiles = buildList {
+                    setup.targetElement.containingFile?.virtualFile?.let(::add)
+                    setup.processor.elements.mapNotNullTo(this) { renamedElement ->
+                        renamedElement.containingFile?.virtualFile
+                    }
+                }.distinct()
+                renamedVirtualFiles.forEach { files.add(getRelativePath(project, it)) }
+                usages.mapNotNullTo(files) { usage ->
+                    usage.virtualFile?.let { getRelativePath(project, it) }
+                }
+                val readOnlyFiles = (
+                    RefactoringScopeGuard.readOnlyFilesIn(project, usages) +
+                        renamedVirtualFiles.filterNot { it.isWritable }
+                            .map { getRelativePath(project, it) }
+                    ).distinct().sorted()
+                Triple(
+                    files,
+                    (fileRenameConflicts + setup.processor.collectPreviewConflicts(usages)).distinct(),
+                    readOnlyFiles
+                )
+            }
+            affectedFiles.addAll(discovered.first)
+            conflicts = discovered.second
+            warnings.addAll(conflicts)
+            if (discovered.third.isNotEmpty()) {
+                warnings.add(RefactoringScopeGuard.blockedMessage(discovered.third))
+            }
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: Exception) {
+            rethrowProcessCanceled(e)
+            discoveryComplete = false
+            val cause = (e as? java.lang.reflect.InvocationTargetException)?.cause ?: e
+            warnings.add(
+                "Usage/conflict discovery failed: ${cause.message ?: cause.javaClass.simpleName}. " +
+                    "The preview is not safe to apply."
+            )
+        }
+
+        if (jsTsFileRetargeting != null) {
+            val importerFiles = suspendingReadAction {
+                jsTsFileRetargeting.references.mapNotNull { reference ->
+                    reference.importerFilePointer?.element?.virtualFile?.let {
+                        getRelativePath(project, it)
+                    }
+                }
+            }
+            affectedFiles.addAll(importerFiles)
+        }
+
+        val metadataTarget = resolvedPreviewTarget ?: element
+        val target = suspendingReadAction {
+            resolvedSymbolInfo(
+                project,
+                metadataTarget,
+                (renameMode as? RenameModeDecision.SymbolIdRenameMode)
+                    ?.takeIf { metadataTarget == element }
+                    ?.symbolId
+            )
+        }
+        val readOnlyTarget = !targetWritable
+        val hasReadOnlyScope = warnings.any { it.startsWith("Blocked by read-only files") }
+        val plannedChange = buildJsonObject {
+            put("operation", "rename")
+            put(
+                "targetType",
+                if (renameMode is RenameModeDecision.FileRenameMode) "file" else "symbol"
+            )
+            put("from", oldName)
+            put("to", plannedNewName)
+            put("overrideStrategy", overrideStrategy)
+            put("relatedRenamingStrategy", relatedRenamingStrategy)
+        }
+        return createJsonResult(
+            refactoringPreview(
+                canApply = discoveryComplete && exactInteractivePlan && !readOnlyTarget &&
+                    !hasReadOnlyScope && conflicts.isEmpty(),
+                target = target,
+                plannedChange = plannedChange,
+                affectedFiles = affectedFiles,
+                usageCount = usageCount,
+                conflictCount = conflicts.size,
+                warnings = warnings,
+                startedAtNanos = startedAtNanos
+            )
+        )
     }
 
     /**
@@ -382,7 +730,9 @@ class RenameSymbolTool : AbstractMcpTool() {
         file: String,
         line: Int,
         column: Int,
-        newName: String
+        newName: String,
+        requireWritable: Boolean = true,
+        detectConflicts: Boolean = true
     ): RenameValidation {
         val psiFile = getPsiFile(project, file)
             ?: return RenameValidation(
@@ -390,7 +740,7 @@ class RenameSymbolTool : AbstractMcpTool() {
                 oldName = "",
                 error = "File not found: $file"
             )
-        if (psiFile.virtualFile?.isWritable == false) {
+        if (requireWritable && psiFile.virtualFile?.isWritable == false) {
             return RenameValidation(
                 element = DummyNamedElement,
                 oldName = "",
@@ -448,7 +798,7 @@ class RenameSymbolTool : AbstractMcpTool() {
         }
 
         // Check for naming conflicts (would show dialog otherwise)
-        val conflictError = checkForConflicts(namedElement, newName)
+        val conflictError = if (detectConflicts) checkForConflicts(namedElement, newName) else null
         if (conflictError != null) {
             return RenameValidation(
                 element = DummyNamedElement,
@@ -461,6 +811,61 @@ class RenameSymbolTool : AbstractMcpTool() {
             element = namedElement,
             oldName = oldName
         )
+    }
+
+    /** Resolves an exact semantic selector without any coordinate/nearest-element fallback. */
+    private fun validateAndPrepareBySemanticTarget(
+        project: Project,
+        arguments: JsonObject,
+        newName: String,
+        requireWritable: Boolean = true,
+        detectConflicts: Boolean = true
+    ): RenameValidation {
+        val symbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID)
+        val element = resolveElementFromArguments(project, arguments).getOrElse {
+            return RenameValidation(
+                DummyNamedElement,
+                "",
+                it.message ?: symbolId?.let(ErrorMessages::symbolIdExpired) ?: ErrorMessages.COULD_NOT_RESOLVE_SYMBOL
+            )
+        }
+        val namedElement = element as? PsiNamedElement
+            ?: return RenameValidation(
+                DummyNamedElement,
+                "",
+                symbolId?.let(ErrorMessages::symbolIdExpired) ?: "Target does not identify a renameable named symbol"
+            )
+        val virtualFile = namedElement.containingFile?.virtualFile
+        if (virtualFile == null || (requireWritable && !virtualFile.isWritable)) {
+            return RenameValidation(
+                DummyNamedElement,
+                "",
+                if (virtualFile == null) symbolId?.let(ErrorMessages::symbolIdExpired) ?: "Target has no editable source file"
+                else "File is read-only and cannot be modified: ${virtualFile.path}"
+            )
+        }
+
+        val oldName = namedElement.name
+            ?: return RenameValidation(DummyNamedElement, "", "Element has no name")
+        if (namedElement is PsiCompiledElement) {
+            return RenameValidation(
+                DummyNamedElement,
+                "",
+                buildCompiledElementErrorMessage(oldName, virtualFile.path)
+            )
+        }
+        if (oldName == newName) {
+            return RenameValidation(DummyNamedElement, oldName, "New name is the same as the current name")
+        }
+        validateNewName(project, namedElement, newName)?.let {
+            return RenameValidation(DummyNamedElement, oldName, it)
+        }
+        if (detectConflicts) {
+            checkForConflicts(namedElement, newName)?.let {
+                return RenameValidation(DummyNamedElement, oldName, it)
+            }
+        }
+        return RenameValidation(namedElement, oldName)
     }
 
     /**
@@ -480,7 +885,10 @@ class RenameSymbolTool : AbstractMcpTool() {
     private fun validateAndPrepareFileRename(
         project: Project,
         file: String,
-        newName: String
+        newName: String,
+        requireWritable: Boolean = true,
+        detectConflicts: Boolean = true,
+        failClosedOnDiscoveryError: Boolean = false
     ): RenameValidation {
         val psiFile = getPsiFile(project, file)
             ?: return RenameValidation(
@@ -488,7 +896,7 @@ class RenameSymbolTool : AbstractMcpTool() {
                 oldName = "",
                 error = "File not found: $file"
             )
-        if (psiFile.virtualFile?.isWritable == false) {
+        if (requireWritable && psiFile.virtualFile?.isWritable == false) {
             return RenameValidation(
                 element = DummyNamedElement,
                 oldName = "",
@@ -506,7 +914,14 @@ class RenameSymbolTool : AbstractMcpTool() {
             )
         }
 
-        retargetJavaFileRenameToClass(project, psiFile, oldName, newName)?.let { return it }
+        retargetJavaFileRenameToClass(
+            project,
+            psiFile,
+            oldName,
+            newName,
+            detectConflicts,
+            failClosedOnDiscoveryError
+        )?.let { return it }
 
         return RenameValidation(
             element = psiFile,
@@ -535,7 +950,9 @@ class RenameSymbolTool : AbstractMcpTool() {
         project: Project,
         psiFile: PsiFile,
         oldName: String,
-        newName: String
+        newName: String,
+        detectConflicts: Boolean = true,
+        failClosedOnDiscoveryError: Boolean = false
     ): RenameValidation? {
         val keepsJavaExtension = newName.endsWith(".java") || !newName.contains('.')
         if (!keepsJavaExtension) return null
@@ -557,7 +974,22 @@ class RenameSymbolTool : AbstractMcpTool() {
                 .filterIsInstance<PsiNamedElement>()
                 .filterNot { implicitClassClass?.isInstance(it) == true }
                 .firstOrNull { it.name == oldBase }
+        } catch (_: ClassNotFoundException) {
+            // Java PSI is optional for this universal tool; no retargeting is available.
+            null
         } catch (e: Exception) {
+            rethrowProcessCanceled(e)
+            if (failClosedOnDiscoveryError) {
+                val cause = (e as? InvocationTargetException)?.cause ?: e
+                return RenameValidation(
+                    element = psiFile,
+                    oldName = oldName,
+                    previewDiscoveryWarnings = listOf(
+                        "Java file rename retargeting discovery failed: " +
+                            "${cause.message ?: cause.javaClass.simpleName}. The preview is not safe to apply."
+                    )
+                )
+            }
             LOG.debug("Java file rename retargeting probe failed: ${e.message}")
             null
         } ?: return null
@@ -565,7 +997,7 @@ class RenameSymbolTool : AbstractMcpTool() {
         val newBase = newName.substringBeforeLast('.')
         if (newBase.isEmpty() || newBase == psiClass.name) return null
         if (validateNewName(project, psiClass, newBase) != null) return null
-        if (checkForConflicts(psiClass, newBase) != null) return null
+        if (detectConflicts && checkForConflicts(psiClass, newBase) != null) return null
         val className = psiClass.name ?: return null
 
         return RenameValidation(
@@ -670,32 +1102,13 @@ class RenameSymbolTool : AbstractMcpTool() {
         val shouldRetargetJsTsFileRename =
             jsTsFileElement != null && jsTsFileRetargeting != null
 
-        // Create the RenameProcessor with language-appropriate settings.
-        // NOTE: We intentionally DON'T search in comments/text occurrences to avoid
-        // non-code usage dialogs. The basic rename is more predictable for agents.
-        // When relatedRenamingStrategy is "ask", use a standard RenameProcessor so the
-        // IDE shows its built-in dialog for each automatic renamer.
-        val renameProcessor = if (relatedRenamingStrategy == "ask") {
-            RenameProcessor(project, targetElement, effectiveNewName, false, false)
-        } else {
-            HeadlessRenameProcessor(project, targetElement, effectiveNewName, false, false)
-        }
-
-        // Register automatic renamers based on the relatedRenamingStrategy.
-        // Factories with null option names are already handled automatically by RenameProcessor.
-        if (relatedRenamingStrategy != "none") {
-            for (factory in AutomaticRenamerFactory.EP_NAME.extensionList) {
-                if (factory.optionName == null) continue
-                if (relatedRenamingStrategy == "accessors_and_tests" && !isAccessorOrTestFactory(factory)) continue
-                renameProcessor.addRenamerFactory(factory)
-            }
-        }
-
-        // Add constructor parameter -> field relation up front.
-        addParameterFieldRelations(project, targetElement, effectiveNewName, renameProcessor)
-
-        // Disable preview dialog for headless operation
-        renameProcessor.setPreviewUsages(false)
+        val renameProcessor = createConfiguredRenameProcessor(
+            project = project,
+            targetElement = targetElement,
+            effectiveNewName = effectiveNewName,
+            relatedRenamingStrategy = relatedRenamingStrategy,
+            forceHeadless = false
+        )
 
         // Collected partial-success data from JS/TS import retargeting.
         val retargetWarnings = mutableListOf<String>()
@@ -764,8 +1177,50 @@ class RenameSymbolTool : AbstractMcpTool() {
             affectedFilesCount = affectedFiles.size,
             relatedRenamesCount = relatedRenamesCount,
             warnings = (conflictWarnings + retargetWarnings).distinct().takeIf { it.isNotEmpty() },
-            unretargetedImporters = unretargetedImporters.distinct().takeIf { it.isNotEmpty() }
+            unretargetedImporters = unretargetedImporters.distinct().takeIf { it.isNotEmpty() },
+            renamedElementPointer = targetPointer
         )
+    }
+
+    /** Builds the same processor configuration for apply and dry-run discovery. */
+    private fun createConfiguredRenameProcessor(
+        project: Project,
+        targetElement: PsiNamedElement,
+        effectiveNewName: String,
+        relatedRenamingStrategy: String,
+        forceHeadless: Boolean,
+        failClosedOnDiscoveryError: Boolean = false
+    ): RenameProcessor {
+        // We intentionally do not search comments/text occurrences: those searches can add
+        // non-code confirmation dialogs and make both apply and preview less deterministic.
+        val renameProcessor = if (!forceHeadless && relatedRenamingStrategy == "ask") {
+            RenameProcessor(project, targetElement, effectiveNewName, false, false)
+        } else {
+            HeadlessRenameProcessor(
+                project,
+                targetElement,
+                effectiveNewName,
+                false,
+                false
+            )
+        }
+
+        if (relatedRenamingStrategy != "none") {
+            for (factory in AutomaticRenamerFactory.EP_NAME.extensionList) {
+                if (factory.optionName == null) continue
+                if (relatedRenamingStrategy == "accessors_and_tests" && !isAccessorOrTestFactory(factory)) continue
+                renameProcessor.addRenamerFactory(factory)
+            }
+        }
+        addParameterFieldRelations(
+            project,
+            targetElement,
+            effectiveNewName,
+            renameProcessor,
+            failClosedOnDiscoveryError
+        )
+        renameProcessor.setPreviewUsages(false)
+        return renameProcessor
     }
 
     /**
@@ -807,7 +1262,8 @@ class RenameSymbolTool : AbstractMcpTool() {
      * For our headless flow, we must detect this substitution and adjust `newName` accordingly.
      *
      * We probe `prepareRenaming` with a temporary map to detect if substitution would occur.
-     * This is safe because `prepareRenaming` only creates lightweight wrapper objects.
+     * Preview first rejects matching-declaration processors that may request confirmation,
+     * because language preparation is not guaranteed to be non-interactive.
      *
      * Additionally, when no substitution occurs and the target remains a `PsiFile`, if the
      * user provided a name without extension, the original file's extension is preserved.
@@ -815,9 +1271,13 @@ class RenameSymbolTool : AbstractMcpTool() {
     private fun computeEffectiveNewName(
         element: PsiNamedElement,
         targetElement: PsiNamedElement,
-        newName: String
+        newName: String,
+        failClosedOnDiscoveryError: Boolean = false
     ): String {
         if (element !is PsiFile) return newName
+        if (failClosedOnDiscoveryError) {
+            HeadlessRenameProcessor.checkPreviewPreparationIsHeadless(targetElement)
+        }
 
         // Probe: check if prepareRenaming would substitute this PsiFile for a different element.
         // Processors like Android's ResourceReferenceRenameProcessor remove the PsiFile from
@@ -827,8 +1287,10 @@ class RenameSymbolTool : AbstractMcpTool() {
         val probeRenames = linkedMapOf<PsiElement, String>(targetElement to newName)
         try {
             processor.prepareRenaming(targetElement, newName, probeRenames)
-        } catch (_: Exception) {
-            // If probing fails, fall through to default behavior
+        } catch (e: Exception) {
+            rethrowProcessCanceled(e)
+            if (failClosedOnDiscoveryError) throw e
+            // Apply compatibility: if probing fails, fall through to default behavior.
         }
 
         val wasSubstituted = targetElement !in probeRenames && probeRenames.isNotEmpty()
@@ -1136,21 +1598,34 @@ class RenameSymbolTool : AbstractMcpTool() {
      *   - "rename_only_current": use the element as-is, skip substitution (no dialog)
      *   - "ask": delegate to substituteElementToRename (shows IDE dialog)
      */
-    private fun resolveRenameTarget(element: PsiNamedElement, overrideStrategy: String): PsiNamedElement {
+    private fun resolveRenameTarget(
+        element: PsiNamedElement,
+        overrideStrategy: String,
+        failClosedOnDiscoveryError: Boolean = false
+    ): PsiNamedElement {
         if (element is PsiFile && shouldBypassDialogSubstitutionForFileRename(element.language.id, overrideStrategy)) {
             return element
         }
 
         when (overrideStrategy) {
             "rename_base" -> {
-                // Resolve to the deepest super method to avoid the dialog
-                val deepestSuper = resolveDeepestSuperMethod(element)
-                if (deepestSuper != null) return deepestSuper
+                // A failed lookup cannot fall back to an interactive choice or a narrower rename.
+                val deepestSuper = resolveDeepestSuperMethod(element, failClosedOnDiscoveryError = true)
+                if (deepestSuper != null) {
+                    // Rename the Kotlin source declaration, not its generated JVM light view.
+                    // This matches the Kotlin processor's substitution for a source function.
+                    val source = deepestSuper.navigationElement
+                    return if (source is PsiNamedElement && isKotlinFunction(source)) source else deepestSuper
+                }
+                if (failClosedOnDiscoveryError || isKotlinFunction(element)) {
+                    // Kotlin functions without a JVM super method still use the headless path.
+                    return resolveNonDialogSubstitution(element, failClosedOnDiscoveryError = true)
+                }
             }
             "rename_only_current" -> {
                 // Use the element directly — skip substituteElementToRename entirely
                 // to avoid the dialog. Only apply non-dialog substitutions.
-                return resolveNonDialogSubstitution(element)
+                return resolveNonDialogSubstitution(element, failClosedOnDiscoveryError)
             }
             "ask" -> {
                 // Fall through to substituteElementToRename (will show dialog)
@@ -1158,23 +1633,42 @@ class RenameSymbolTool : AbstractMcpTool() {
         }
 
         // For non-override elements or "ask" strategy, use standard substitution
+        interactiveTargetSelectionHook?.invoke()
         val elementProcessor = RenamePsiElementProcessor.forElement(element)
         val substituted = elementProcessor.substituteElementToRename(element, null)
         return (substituted as? PsiNamedElement) ?: element
+    }
+
+    private fun isKotlinFunction(element: PsiNamedElement): Boolean = try {
+        Class.forName("org.jetbrains.kotlin.psi.KtNamedFunction").isInstance(element.navigationElement)
+    } catch (_: ClassNotFoundException) {
+        false
     }
 
     /**
      * Applies non-dialog substitutions (e.g., record component for accessor).
      * Skips substituteElementToRename() which would trigger the super method dialog.
      */
-    private fun resolveNonDialogSubstitution(element: PsiNamedElement): PsiNamedElement {
+    private fun resolveNonDialogSubstitution(
+        element: PsiNamedElement,
+        failClosedOnDiscoveryError: Boolean = false
+    ): PsiNamedElement {
         try {
+            val psiMethodClass = Class.forName("com.intellij.psi.PsiMethod")
+            if (!psiMethodClass.isInstance(element)) return element
+            if (psiMethodClass.getMethod("isConstructor").invoke(element) == true) {
+                return psiMethodClass.getMethod("getContainingClass").invoke(element) as? PsiNamedElement ?: element
+            }
             // Check for record component accessor (Java 16+)
             val recordUtilClass = Class.forName("com.intellij.psi.util.JavaPsiRecordUtil")
-            val result = recordUtilClass.getMethod("getRecordComponentForAccessor", Class.forName("com.intellij.psi.PsiMethod"))
+            val result = recordUtilClass.getMethod("getRecordComponentForAccessor", psiMethodClass)
                 .invoke(null, element)
             if (result is PsiNamedElement) return result
+        } catch (_: ClassNotFoundException) {
+            // Record PSI is optional; retain the original target when Java is unavailable.
         } catch (e: Exception) {
+            rethrowProcessCanceled(e)
+            if (failClosedOnDiscoveryError) throw e
             LOG.warn("Failed to resolve record component for accessor: ${e.message}", e)
         }
         return element
@@ -1186,13 +1680,30 @@ class RenameSymbolTool : AbstractMcpTool() {
      *
      * Handles both:
      * - Java/Kotlin PsiMethod (including KtLightMethod) via PsiMethod.findDeepestSuperMethods()
-     * - Kotlin KtNamedFunction via KtNamedFunction.getOverriddenDescriptors() (reflection)
+     * - Kotlin KtNamedFunction via toLightMethods(PsiElement) (reflection)
      *
      * Uses reflection to access language-specific APIs to keep the tool language-agnostic.
      */
-    private fun resolveDeepestSuperMethod(element: PsiNamedElement): PsiNamedElement? {
+    private fun resolveDeepestSuperMethod(
+        element: PsiNamedElement,
+        failClosedOnDiscoveryError: Boolean = false
+    ): PsiNamedElement? {
+        if (ApplicationManager.getApplication().isDispatchThread) {
+            // Like usage search, Kotlin K2 super-method resolution must run off the EDT.
+            return ProgressManager.getInstance().runProcessWithProgressSynchronously(
+                ThrowableComputable<PsiNamedElement?, RuntimeException> {
+                    ReadAction.compute<PsiNamedElement?, RuntimeException> {
+                        resolveDeepestSuperMethod(element, failClosedOnDiscoveryError)
+                    }
+                },
+                "Resolving base method",
+                true,
+                element.project
+            )
+        }
         // Try Java/Kotlin PsiMethod path (covers KtLightMethod too)
         try {
+            deepestSuperMethodResolutionHook?.let { return it(element) }
             val psiMethodClass = Class.forName("com.intellij.psi.PsiMethod")
             if (psiMethodClass.isInstance(element)) {
                 val deepestSuperMethods = psiMethodClass.getMethod("findDeepestSuperMethods")
@@ -1202,7 +1713,11 @@ class RenameSymbolTool : AbstractMcpTool() {
                 }
                 return null
             }
+        } catch (_: ClassNotFoundException) {
+            // Java PSI is optional for this universal tool.
         } catch (e: Exception) {
+            rethrowProcessCanceled(e)
+            if (failClosedOnDiscoveryError) throw e
             LOG.warn("Failed to resolve deepest super method via PsiMethod API: ${e.message}", e)
         }
 
@@ -1213,7 +1728,7 @@ class RenameSymbolTool : AbstractMcpTool() {
 
             // Use LightClassUtils to get the light method wrapper
             val lightClassUtilsClass = Class.forName("org.jetbrains.kotlin.asJava.LightClassUtilsKt")
-            val lightElements = lightClassUtilsClass.getMethod("toLightMethods", Class.forName("org.jetbrains.kotlin.psi.KtDeclaration"))
+            val lightElements = lightClassUtilsClass.getMethod("toLightMethods", PsiElement::class.java)
                 .invoke(null, element) as? List<*> ?: return null
 
             val lightMethod = lightElements.firstOrNull() ?: return null
@@ -1227,11 +1742,22 @@ class RenameSymbolTool : AbstractMcpTool() {
             if (deepestSuperMethods.isNotEmpty()) {
                 return deepestSuperMethods[0] as? PsiNamedElement
             }
+        } catch (_: ClassNotFoundException) {
+            // Kotlin PSI is optional for this universal tool.
         } catch (e: Exception) {
+            rethrowProcessCanceled(e)
+            if (failClosedOnDiscoveryError) throw e
             LOG.warn("Failed to resolve deepest super method via Kotlin KtNamedFunction API: ${e.message}", e)
         }
 
         return null
+    }
+
+    private fun rethrowProcessCanceled(throwable: Throwable) {
+        generateSequence(throwable) { it.cause }
+            .filterIsInstance<ProcessCanceledException>()
+            .firstOrNull()
+            ?.let { throw it }
     }
 
     /**
@@ -1251,7 +1777,8 @@ class RenameSymbolTool : AbstractMcpTool() {
         project: Project,
         element: PsiNamedElement,
         newName: String,
-        renameProcessor: RenameProcessor
+        renameProcessor: RenameProcessor,
+        failClosedOnDiscoveryError: Boolean = false
     ): Int {
         var count = 0
 
@@ -1336,6 +1863,8 @@ class RenameSymbolTool : AbstractMcpTool() {
                 count++
             }
         } catch (e: Exception) {
+            rethrowProcessCanceled(e)
+            if (failClosedOnDiscoveryError) throw e
             // Reflection failed - likely not a Java/Kotlin project or different PSI structure
             // This is expected for other languages, silently continue
         }

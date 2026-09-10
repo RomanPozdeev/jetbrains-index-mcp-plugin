@@ -12,7 +12,9 @@ build works before committing or raising a PR.
 Most tools this protocol exercises are **disabled by default** and hidden from `tools/list`:
 `ide_set_power_save_mode`, `ide_open_project`, `ide_close_project`, `ide_install_plugin`,
 `ide_restart`, `ide_set_lifecycle_log_file`, and every lifecycle tool except
-`ide_project_status` (see `DEFAULT_DISABLED_TOOLS` in `McpSettings.kt`). Enable them first in
+`ide_project_status` (see `DEFAULT_DISABLED_TOOLS` in `McpSettings.kt`). The contract checks below
+also need `ide_symbol_info`, `ide_find_symbol`, `ide_file_structure`, and `ide_change_signature`.
+Enable them first in
 Settings → Tools → Index MCP Server → Exposed Tools, or every affected step fails with a
 disabled-tool error on a fresh install.
 
@@ -176,6 +178,148 @@ PP=/path/to/jetbrains-index-mcp-plugin   # adjust to actual path
   timestamped entry within 15s
 - FAIL: response received but no `restarter.log` entry — likely a save-dialog prompt
   intercepted the restart. Fix: `saveAll()` before `restart(true)`, called via `edtAction {}`
+
+---
+
+## Semantic contract smoke tests
+
+Use a disposable project opened in the installed IDE. Include Java fixtures with overloaded
+methods, a local variable, callers, a small inheritance chain, and a call chain longer than two
+nodes. Include this physical Kotlin source (or an equivalent one) in a Kotlin-enabled module:
+
+```kotlin
+package smoke
+
+interface Contract
+class Implementation : Contract
+enum class State { READY }
+annotation class Marker
+object Singleton
+
+fun anonymous(): Contract = object : Contract {}
+```
+
+The Kotlin checks must run against the **installed IDE and its bundled Kotlin plugin**. The opt-in
+`-PkotlinPluginTests=true` fixtures cover Kotlin class kinds and safe-delete parameters;
+this installed-IDE smoke test additionally checks the complete protocol and tool interaction.
+
+### S1. Fresh `initialize` → `tools/list` schema
+
+1. Discard the MCP connection that existed before plugin install/restart. MCP clients such as
+   Codex cache `ALL_TOOLS`; reconnect or restart the client before judging the schema.
+2. Send a fresh initialize request:
+
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": 1,
+     "method": "initialize",
+     "params": {
+       "protocolVersion": "2025-06-18",
+       "capabilities": {},
+       "clientInfo": { "name": "index-mcp-smoke", "version": "1" }
+     }
+   }
+   ```
+
+3. On that fresh connection, call `tools/list`.
+4. PASS: `capabilities.tools.listChanged` is absent or `false`, never `true`.
+5. PASS: semantic/refactoring schemas expose `symbolId` and structured `target`; the `target`
+   object exposes `symbolId`, `position`, `qualifiedName`, and `language` properties.
+6. PASS: `ide_refactor_rename`, `ide_refactor_safe_delete`, and `ide_change_signature` each expose
+   boolean `dryRun`.
+7. FAIL: only a pre-update schema is visible until the client reconnects. That is stale client
+   state, not a reason to advertise `listChanged: true`; the server does not yet send/serve that
+   notification on every transport.
+
+### S2. `symbolId`, unified targets, overloads, locals, and line shifts
+
+1. Discover an overloaded Java method and a local variable through semantic search/definition.
+2. PASS: results include opaque `sym_...` handles and each handle resolves the exact overload/local
+   through `ide_symbol_info` with `{ "target": { "symbolId": "..." } }`.
+3. Resolve the same declaration twice. PASS: both handles are valid even if they are unequal; do
+   not interpret ID equality as symbol equality.
+4. Insert lines above the declaration outside the IDE, call `ide_sync_files` for the changed file,
+   and reuse the original handle. PASS: it resolves at the new line.
+5. Preview and then apply a rename through that handle. PASS: references update and
+   `updatedSymbol.symbolId` resolves the renamed declaration with current metadata.
+6. Exercise all three nested variants — `target.symbolId`, `target.position`, and
+   `target.qualifiedName` + `language`. PASS: each resolves; mixing nested `target` with any legacy
+   top-level selector returns an error.
+7. Restart the MCP server and retry the old handle. PASS: `SYMBOL_ID_EXPIRED`; rediscovery is
+   required and the server does not fall back to saved coordinates.
+
+### S3. Refactoring previews are byte-for-byte non-mutating
+
+For each of `ide_refactor_rename`, `ide_refactor_safe_delete`, and `ide_change_signature`:
+
+1. Record SHA-256 for every file in the disposable fixture (for example with
+   `find <fixture> -type f -exec shasum -a 256 {} + | sort`).
+2. Call the refactoring with `dryRun: true`. Include a Java overloaded method/caller case; for safe
+   delete, cover both a referenced symbol (`canApply: false` without `force`) and an unused symbol.
+3. PASS: the response has `dryRun: true`, `canApply`, populated current `target`, an
+   operation-specific `plannedChange`, `affectedFiles`, `usageCount`, `conflictCount`, `warnings`,
+   and `elapsedMs`.
+4. Recompute SHA-256. PASS: the checksum list is byte-for-byte identical; no file appeared,
+   disappeared, or changed, no document was saved, and Undo has no preview command.
+5. Send the same request without `dryRun`. PASS: rename/change signature updates the exact overload
+   and its callers; safe delete removes the selected symbol/file and invalidates its handle.
+
+### S4. Kotlin metadata and structured file outline
+
+1. Run `ide_find_class`, `ide_find_symbol`, `ide_symbol_info`, and `ide_file_structure` against the
+   physical Kotlin fixture above.
+2. PASS: `Contract`, `Implementation`, `State`, `Marker`, and `Singleton` are classified as
+   `INTERFACE`, `CLASS`, `ENUM`, `ANNOTATION`, and `OBJECT` respectively where class-kind metadata
+   is returned.
+3. PASS: named declarations use `smoke.*` qualified names from Kotlin PSI.
+4. PASS: the object expression is named like
+   `<anonymous implementation of Contract at <file>:<line>>` and has `qualifiedName: null`.
+5. PASS: `ide_file_structure` retains the formatted `structure` string and adds `nodes`; every node
+   contains `name`, `kind`, nullable `signature`, `modifiers`, 1-based `line`, nullable `endLine`,
+   `children`, and nullable `symbolId`.
+6. Reuse a child node's ID with `ide_symbol_info`. PASS: it resolves that exact PSI declaration,
+   including when two declarations are placed on nearby lines.
+
+### S5. Hierarchy bounds and continuation
+
+1. Call `ide_type_hierarchy` on the Java hierarchy with `maxNodes: 2`.
+2. PASS: at most two non-root nodes are returned and expanded; `returnedNodes` matches the page,
+   `returnedNodes == traversal.length`, `truncated == hasMore`, `elapsedMs` is present, and
+   `cursor` is non-null when `hasMore` is true, unless `truncationReason` reports a terminal
+   retention limit. That case retains the computed page and requires a narrower fresh query. Every traversal entry has direction `supertype` or
+   `subtype` and an `element` matching the corresponding legacy direction array.
+3. Continue with `{ "cursor": "...", "maxNodes": 2 }` until `hasMore: false`.
+4. PASS: concatenated `traversal` pages contain no duplicate nodes and preserve the observable
+   combined breadth-first order. Repeating the fresh query produces the same traversal order.
+   `supertypes` and `subtypes` remain backward-compatible filtered views; do not concatenate them
+   to verify combined order because that loses interleaving.
+5. Repeat for `ide_call_hierarchy` in both directions with a depth that spans multiple pages.
+   PASS: `calls` is a flat BFS page and never exceeds `maxNodes`; nodes have stable `nodeId`,
+   `parentId`, and `depth` for their first-discovery tree. Without `maxNodes`/`cursor`, call and
+   type hierarchies still return the legacy nested trees and per-node limits.
+6. PASS: using a type cursor with the call tool, using a cursor through another project instance,
+   or reusing it after MCP restart returns an explicit cursor error and asks for a fresh query.
+7. Do not wait for push/live progress: stateless HTTP exposes progress only through page metadata.
+
+### S6. Multi-file diagnostics and deleted-path sync
+
+1. Call `ide_diagnostics` with two files, one containing a known error.
+2. PASS: `problems` is one aggregate list and `fileAnalyses` contains one entry per requested path
+   with `file`, `mode`, `fresh`, `timedOut`, and optional `message`.
+3. PASS: `file` + `files` together is rejected. `line`, `column`, `startLine`, or `endLine` with
+   `files` is rejected. A single `file` still returns the legacy top-level analysis metadata and
+   supports intentions/range filtering.
+4. Include enough slow files to exhaust the configured diagnostics timeout. PASS: the call uses one
+   overall budget and marks remaining file analyses timed out; it does not wait a new full timeout
+   per file.
+5. Create and externally delete a nested fixture path, then call `ide_sync_files` with that deleted
+   relative path.
+6. PASS: `requestedPaths` echoes it, `deletedPaths` contains it, and `refreshedRoots` names the
+   nearest existing parent actually refreshed. A following semantic search no longer sees the
+   deleted declaration.
+7. PASS: an absolute path, a `..` path, a symlink escape, or a `project_path` outside the selected
+   project/content roots is rejected before any member of the batch is refreshed.
 
 ---
 

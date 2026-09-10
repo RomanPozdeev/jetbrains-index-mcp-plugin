@@ -101,41 +101,55 @@ When working in a git worktree (e.g., `/project/.claude/worktrees/agent-xyz` or 
 1. **Line and column are 1-based** (first line = 1, first column = 1)
 2. **Project file paths are relative** to project root (e.g., `src/main/java/App.java`, NOT absolute paths). If an IDE tool returns a dependency/library file, keep the returned absolute path or `jar://` URL unchanged when passing it back to read-only navigation tools or `ide_read_file`
 3. **Column must point to the symbol name**, not whitespace or punctuation. For `public void myMethod()`, column should land on `m` of `myMethod`. For dotted expressions like `json.dumps()` or `os.path.join()`, put the column on the member token (`dumps`, `join`) when you want the member definition rather than the module/package.
-4. **project_path is only needed** for multi-project workspaces. Omit for single-project setups. When needed, use the absolute path to the project root.
+4. **project_path is only needed** for multi-project workspaces. Omit for single-project setups. A valid `symbolId` also routes directly to its owning project instance, so an ID-only call may omit it even with multiple projects open. When needed, use the absolute path to the project root.
 5. **Use built-in search scope intentionally**: `ide_find_references`, `ide_find_implementations`, `ide_type_hierarchy`, `ide_call_hierarchy`, `ide_find_class`, `ide_find_file`, and `ide_find_symbol` accept `scope`. Use `project_files` for the default project-only view, `project_and_libraries` when dependency code matters, `project_production_files` to stay out of tests, and `project_test_files` when you want test-only results.
 6. **Narrow by directory with `paths`**: `ide_search_text`, `ide_find_references`, and `ide_structural_search_replace` accept `paths`, an array of project-relative globs where a leading `!` excludes — e.g. `{"paths": ["src/main/kotlin/**/handlers/**", "!**/*Test.kt"]}`. Prefer one scoped call over a project-wide search you filter yourself: filtering client-side pays tokens for every discarded hit, and with pagination a whole page can be filtered away and look like an empty result. Composes with `scope` and `filePattern`.
+7. **Prefer `symbolId` when chaining semantic calls**: `ide_find_symbol`, `ide_find_class`, `ide_find_definition`, references, and hierarchy results expose opaque handles. Pass one by itself (plus operation options) to semantic target tools and symbol refactorings instead of repeating coordinates/name selectors. IDs are non-canonical: one PSI symbol may have multiple unequal, simultaneously valid handles, so never compare IDs for symbol equality. Reusing a concrete handle follows line shifts and rename. IDs are valid only for the current MCP server session and exact project instance, expire after one hour idle or LRU eviction, and return `SYMBOL_ID_EXPIRED` after deletion/restart; rediscover the symbol rather than guessing a nearby position. After refactoring, continue with `updatedSymbol.symbolId`; after safe delete, treat `invalidatedSymbolId` as unusable. Target-aware tools also accept exactly one nested `target`: `{symbolId}`, `{position:{file,line,column}}`, or `{qualifiedName,language}`; do not mix it with legacy top-level selectors.
+8. **Preview risky refactorings first**: set `dryRun: true` on rename, safe delete, or change signature. Check `canApply`, `plannedChange`, `affectedFiles`, usage/conflict counts, and `warnings`; preview does not write or save files and creates no undo entry. Apply with a second call only after reviewing the result.
+9. **Page hierarchies explicitly**: set `maxNodes`, then follow returned `cursor`. Without either parameter the legacy nested trees and limits remain. Paged nodes expose traversal-local `nodeId`, `parentId`, and `depth` for their first-discovery parent, independent of symbol handles. Type `traversal` gives combined BFS order; direction-specific arrays are filtered views. If `hasMore=true` but no cursor is returned, inspect `truncationReason` and narrow the query: a retention limit stopped traversal, but the returned page is usable. Cursors expire after ten idle minutes, eviction, restart or project change.
+10. **Use the right diagnostics scope**: use `file` for intentions or line/range filters; use mutually exclusive `files` for a small batch. A `files` request shares one timeout budget and returns aggregate `problems` plus per-path `fileAnalyses`. Code problems share a 100-item response cap: inspect aggregate/per-file `problemsTruncated` and per-file returned `problemCount`; a fresh file may still have omitted problems. Re-query truncated paths with `file`, narrowing line ranges if needed. Use `ide_project_diagnostics` for broad, fail-closed project coverage.
+11. **Inspect structured outlines when chaining**: `ide_file_structure.structure` is the compatible display string; prefer `nodes` for automation. Nodes include semantic kind, signature, modifiers, line range, children, and an optional ID bound to the exact PSI declaration. All nodes remain present, but at most 500 receive handles per response; `symbolIdsTruncated`/`symbolIdsOmitted` report handle-budget omissions. Use targeted discovery for a missing handle. Kotlin kinds distinguish interface/class/enum/annotation/object; anonymous implementations have readable location names and no qualified name.
+12. **Reconnect after plugin updates**: the MCP client may cache `ALL_TOOLS` for the connection. After installing/reloading a new plugin build, reconnect or restart the client before relying on new schemas. The server intentionally advertises `listChanged: false` because every transport does not yet deliver tool-list notifications.
 
 ## Tool Selection by Task
 
 ### "I need to understand how X is used"
+
 1. `ide_find_references` - all call sites, field accesses, imports
 2. `ide_call_hierarchy` with `direction: "callers"` - full call chain upward
 
 ### "I need to understand what X is"
+
 1. `ide_symbol_info` - resolved signature + doc comment without reading the file (disabled by default)
 2. `ide_find_definition` - jump to source
 3. `ide_type_hierarchy` - inheritance chain
 4. `ide_find_super_methods` - what interface/base method it implements
 
 ### "I need to find a class/file/symbol"
+
 1. `ide_find_class` - classes by name (CamelCase: `USvc` finds `UserService`)
 2. `ide_find_file` - files by name
 3. `ide_search_text` - substring text search across project (regex via `"regex": true`)
 
 ### "I need to refactor"
-1. `ide_refactor_rename` - rename symbol + all references atomically
-2. `ide_move_file` - move file and let the IDE apply semantic updates when that language/backend supports them
-3. `ide_refactor_safe_delete` - delete with usage checking (Java/Kotlin only)
-4. `ide_replace_text_in_file`, `ide_reformat_code` - apply project code style (disabled by default)
+
+1. Preview rename/safe delete/change signature with `dryRun: true`; inspect blockers and affected files
+2. `ide_refactor_rename` - rename symbol + all references atomically
+3. `ide_move_file` - move file and let the IDE apply semantic updates when that language/backend supports them
+4. `ide_refactor_safe_delete` - delete with usage checking (Java/Kotlin only)
+5. `ide_replace_text_in_file`, `ide_reformat_code` - apply project code style (disabled by default)
 
 ### "I need to check for problems"
-1. `ide_diagnostics` - compiler errors, warnings, quick fixes for one file (plus build/test results)
+
+1. `ide_diagnostics` - compiler errors/warnings for one `file` or a small `files` batch; quick fixes and ranges are single-file only (plus build/test results)
 2. `ide_project_diagnostics` - batch/project scope including unopened files, with fail-closed coverage metadata (`complete` flag, per-file states); long analyses return an `analysisId` to poll (disabled by default)
 
 ### "I need to find implementations of an interface"
+
 1. `ide_find_implementations` - cursor on interface/abstract class/method
 
 ### "I need to trace call chains"
+
 1. `ide_call_hierarchy` with `direction: "callers"` - who calls this?
 2. `ide_call_hierarchy` with `direction: "callees"` - what does this call?
 
@@ -156,6 +170,8 @@ When working in a git worktree (e.g., `/project/.claude/worktrees/agent-xyz` or 
 7. **Rewriting plugin-returned library paths**: If a search or read tool returns an absolute path or `jar://` URL for a dependency/library file, pass that path back unchanged to read-only navigation tools or `ide_read_file`.
 
 8. **Not syncing after external file changes**: After creating files via Write tool, call `ide_sync_files` before searching.
+
+   Deleted paths already known to VFS are valid sync targets; unknown missing paths are rejected: the tool refreshes their nearest existing parent and reports `requestedPaths`, `refreshedRoots`, and `deletedPaths`. Never pass absolute paths or traversal segments.
 
 9. **Assuming regex is the default in `ide_search_text`**: Regex requires `"regex": true`; otherwise the tool does plain-text substring matching.
 
@@ -180,6 +196,8 @@ These tools exist but are disabled by default. They are omitted from `tools/list
 `ide_build_project`, `ide_change_signature`, `ide_close_project`, `ide_convert_java_to_kotlin`, `ide_create_file`, `ide_create_module`, `ide_edit_member`, `ide_enroll_all_projects`, `ide_file_structure`, `ide_find_symbol`, `ide_get_active_file`, `ide_get_project_modes`, `ide_import_modules`, `ide_insert_member`, `ide_install_plugin`, `ide_lifecycle_log`, `ide_link_build_system`, `ide_list_tests`, `ide_open_file`, `ide_open_project`, `ide_open_workspace`, `ide_optimize_imports`, `ide_project_diagnostics`, `ide_read_file`, `ide_reformat_code`, `ide_release_all_projects`, `ide_release_project`, `ide_reload_project`, `ide_replace_member`, `ide_replace_text_in_file`, `ide_restart`, `ide_run_tests`, `ide_set_all_project_modes`, `ide_set_lifecycle_log_file`, `ide_set_power_save_mode`, `ide_set_project_mode`, `ide_structural_search_replace`, `ide_symbol_info`
 
 Note: `ide_restart` terminates the MCP connection — reconnect your client after calling it.
+After any plugin install/update, reconnect or restart the MCP client once the IDE reloads the plugin;
+clients such as Codex cache `ALL_TOOLS` and otherwise keep the old schema.
 Note: `ide_close_project` refuses to close the last open project; `ide_open_project` requires an absolute path and may take up to `timeoutSeconds` (default 600) while the project indexes.
 
 ## Enforcing IDE Tool Usage with Hooks

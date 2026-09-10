@@ -48,6 +48,12 @@ class McpServerService(
     private val toolRegistry: ToolRegistry = ToolRegistry()
     private val serverFactory: McpServerFactory
     private val legacySseTransports: LegacySseTransports = LegacySseTransports()
+    private val serverEpoch: McpServerEpoch = McpServerEpoch.shared
+    private val symbolIdRegistry: SymbolIdRegistry = SymbolIdRegistry.getInstance()
+    private val paginationService: PaginationService =
+        ApplicationManager.getApplication().getService(PaginationService::class.java)
+    private val hierarchyContinuationRegistry: HierarchyContinuationRegistry =
+        HierarchyContinuationRegistry.getInstance()
 
     // Written under the instance monitor (startServer/stopServer), read lock-free from
     // status accessors on arbitrary threads — hence @Volatile.
@@ -225,12 +231,19 @@ class McpServerService(
      * Stops the MCP server.
      *
      * Synchronized with [startServer] so a stop can never interleave with a concurrent
-     * restart's stop-then-start sequence.
+     * restart's stop-then-start sequence. All handle registries cross one atomic epoch boundary:
+     * old in-flight requests are rejected, and new requests cannot start until every cache is
+     * clear.
      */
     @Synchronized
     fun stopServer() {
         ktorServer?.stop()
         ktorServer = null
+        serverEpoch.advanceAndReset {
+            symbolIdRegistry.clearForSessionReset()
+            paginationService.clearForSessionReset()
+            hierarchyContinuationRegistry.clearForSessionReset()
+        }
     }
 
     /**

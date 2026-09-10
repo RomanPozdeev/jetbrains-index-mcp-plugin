@@ -1,12 +1,15 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.*
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.ResolvedSymbolInfo
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiMethod
 import com.intellij.psi.codeStyle.CodeStyleManager
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -19,7 +22,8 @@ data class MemberEditResult(
     val file: String,
     val message: String,
     val startLine: Int? = null,
-    val endLine: Int? = null
+    val endLine: Int? = null,
+    val updatedSymbol: ResolvedSymbolInfo? = null
 )
 
 @Serializable
@@ -54,6 +58,28 @@ data class InsertPreparation(
 )
 
 object MemberEditingUtils {
+
+    /** A JVM accessor or generated method must never authorize editing its enclosing declaration. */
+    fun resolveEditableSourceTarget(declaration: PsiElement): Result<PsiElement> {
+        val target = PsiUtils.resolveNavigationTarget(declaration)
+        if (declaration is PsiMethod && target.language.id == "kotlin" && declaration !== target) {
+            val isSourceFunction = Class.forName("org.jetbrains.kotlin.psi.KtFunction").isInstance(target)
+            val isSourceConstructor = Class.forName("org.jetbrains.kotlin.psi.KtConstructor").isInstance(target)
+            val matchesSourceMethod = isSourceFunction && declaration.isConstructor == isSourceConstructor &&
+                PsiUtils.toLightMethods(target).any { method ->
+                    method.name == declaration.name &&
+                        method.parameterList.parameters.map { it.type.canonicalText } ==
+                        declaration.parameterList.parameters.map { it.type.canonicalText }
+                }
+            if (!matchesSourceMethod) {
+                return Result.failure(IllegalArgumentException(
+                    "The selected JVM method has no standalone Kotlin declaration to edit. " +
+                        "Select the intended source declaration explicitly."
+                ))
+            }
+        }
+        return Result.success(target)
+    }
 
     fun resolvePsiFile(project: Project, filePath: String, virtualFile: com.intellij.openapi.vfs.VirtualFile?): PsiFile? {
         val vFile = virtualFile ?: return null

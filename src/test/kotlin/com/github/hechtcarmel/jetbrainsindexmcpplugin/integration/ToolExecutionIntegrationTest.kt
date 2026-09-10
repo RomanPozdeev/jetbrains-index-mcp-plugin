@@ -231,23 +231,16 @@ class ToolExecutionIntegrationTest : McpPlatformTestCase() {
     }
 
     fun testReadFileToolReadsLinesAndMetadata() = runBlocking {
-        val basePath = project.basePath?.let { File(it) }
-        val readmeFile = if (basePath != null && basePath.exists()) {
-            File(basePath, "ReadMe.java")
-        } else {
-            Files.createTempFile("jetbrains-index-mcp", "ReadMe.java").toFile()
-        }
-        Files.writeString(readmeFile.toPath(), "line1\nline2\nline3\nline4")
+        writeProjectFile("ReadMe.java", "line1\nline2\nline3\nline4")
 
         val tool = ReadFileTool()
         val result = tool.execute(project, buildJsonObject {
-            val fileArg = if (basePath != null && basePath.exists()) "ReadMe.java" else readmeFile.absolutePath
-            put("file", fileArg)
+            put("file", "ReadMe.java")
             put("startLine", 2)
             put("endLine", 3)
         })
 
-        assertFalse("Should succeed for valid file", result.isFailure)
+        assertFalse("Should succeed for valid file: $result", result.isFailure)
         val content = result.content.first() as TextContent
         val readFile = json.decodeFromString<ReadFileResult>(content.text)
 
@@ -256,13 +249,10 @@ class ToolExecutionIntegrationTest : McpPlatformTestCase() {
         assertEquals(4, readFile.lineCount)
         assertEquals(2, readFile.startLine)
         assertEquals(3, readFile.endLine)
-        if (basePath != null && basePath.exists()) {
-            assertFalse("Project files should not be marked as library", readFile.isLibraryFile)
-        }
+        assertFalse("Project files should not be marked as library", readFile.isLibraryFile)
 
         val singleLine = tool.execute(project, buildJsonObject {
-            val fileArg = if (basePath != null && basePath.exists()) "ReadMe.java" else readmeFile.absolutePath
-            put("file", fileArg)
+            put("file", "ReadMe.java")
             put("startLine", 4)
         })
         assertFalse("Single-line read should succeed", singleLine.isFailure)

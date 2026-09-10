@@ -3,6 +3,7 @@ package com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.java.JavaHierarchyMethodComplement
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PluginDetectors
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.ProjectUtils
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.PsiUtils
 import com.intellij.navigation.ChooseByNameContributor
 import com.intellij.navigation.ChooseByNameContributorEx
 import com.intellij.navigation.NavigationItem
@@ -11,7 +12,6 @@ import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
-import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.codeStyle.MinusculeMatcher
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.util.indexing.FindSymbolParameters
@@ -276,25 +276,14 @@ object OptimizedSymbolSearch {
         if (!scope.contains(file)) return null
         val relativePath = ProjectUtils.getToolFilePath(project, file)
 
-        val name = when (targetElement) {
-            is PsiNamedElement -> targetElement.name
-            else -> {
-                try {
-                    val method = targetElement.javaClass.getMethod("getName")
-                    method.invoke(targetElement) as? String
-                } catch (e: Exception) {
-                    null
-                }
-            }
-        } ?: return null
+        val name = PsiUtils.classDisplayName(project, targetElement) ?: return null
 
-        val directQualifiedName = try {
-            val method = targetElement.javaClass.getMethod("getQualifiedName")
-            method.invoke(targetElement) as? String
-        } catch (e: Exception) {
-            null
-        }
-        val qualifiedName = directQualifiedName ?: buildQualifiedNameFromContainer(targetElement, name)
+        val qualifiedName = PsiUtils.qualifiedName(targetElement)
+            ?: if (name.startsWith("<anonymous implementation of ")) {
+                null
+            } else {
+                buildQualifiedNameFromContainer(targetElement, name)
+            }
 
         val line = getLineNumber(project, targetElement) ?: 1
         val kind = determineKind(targetElement)
@@ -308,7 +297,8 @@ object OptimizedSymbolSearch {
             line = line,
             column = getColumnNumber(project, targetElement) ?: 1,
             containerName = containerName,
-            language = language
+            language = language,
+            pointerTarget = targetElement
         )
     }
 
@@ -316,14 +306,9 @@ object OptimizedSymbolSearch {
         var parent = element.parent
 
         while (parent != null) {
-            try {
-                val method = parent.javaClass.getMethod("getQualifiedName")
-                val parentQualifiedName = method.invoke(parent) as? String
-                if (!parentQualifiedName.isNullOrBlank()) {
-                    return "$parentQualifiedName.$name"
-                }
-            } catch (_: Exception) {
-                // Ignore and continue walking up the PSI tree.
+            val parentQualifiedName = PsiUtils.qualifiedName(parent)
+            if (!parentQualifiedName.isNullOrBlank()) {
+                return "$parentQualifiedName.$name"
             }
             parent = parent.parent
         }
@@ -366,6 +351,8 @@ object OptimizedSymbolSearch {
     }
 
     private fun determineKind(element: PsiElement): String {
+        PsiUtils.kotlinClassKind(element)?.let { return it }
+
         val className = element.javaClass.simpleName.lowercase()
         return when {
             // Rust types

@@ -10,7 +10,6 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScop
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobMatcher
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
-import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.AbstractMcpTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FindUsagesResult
@@ -45,6 +44,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class FindUsagesTool : AbstractMcpTool() {
+
+    override val supportsUnifiedTarget: Boolean = true
 
     companion object {
         private val LOG = logger<FindUsagesTool>()
@@ -81,6 +82,7 @@ class FindUsagesTool : AbstractMcpTool() {
         Supports pagination: first call returns results + nextCursor. Pass cursor to get the next page.
 
         Target (mutually exclusive):
+        - symbolId: opaque handle returned by a previous semantic call (necessary for fresh search, ignored when cursor is provided)
         - file + line + column: position-based lookup (necessary for fresh search, ignored when cursor is provided)
         - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()}; necessary for fresh search, ignored when cursor is provided)
         - cursor: pagination cursor from a previous response
@@ -96,6 +98,8 @@ class FindUsagesTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
+        .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
         .languageAndSymbol(required = false)
@@ -161,16 +165,11 @@ class FindUsagesTool : AbstractMcpTool() {
             // Echo the declaration actually searched: position-based lookup snaps comments and
             // whitespace to the nearest enclosing named element, and without this echo that
             // snap is invisible to the caller.
-            val nav = targetElement.navigationElement ?: targetElement
-            val declFile = nav.containingFile?.virtualFile
-            val declDoc = nav.containingFile?.let { PsiDocumentManager.getInstance(project).getDocument(it) }
-            val resolvedInfo = ResolvedSymbolInfo(
-                name = (targetElement as? PsiNamedElement)?.name,
-                kind = UsageViewUtil.getType(targetElement).takeIf { it.isNotBlank() },
-                container = PsiUtils.qualifiedName(targetElement)
-                    ?: PsiUtils.getAstPath(nav).joinToString(".").ifEmpty { null },
-                file = declFile?.let { getRelativePath(project, it) },
-                line = declDoc?.getLineNumber(nav.textOffset)?.plus(1)
+            val resolvedInfo = resolvedSymbolInfo(
+                project,
+                targetElement,
+                optionalStringArg(arguments, ParamNames.SYMBOL_ID),
+                preserveExactTarget = true
             )
 
             val usages = ConcurrentLinkedQueue<UsageLocation>()
@@ -256,10 +255,15 @@ class FindUsagesTool : AbstractMcpTool() {
                 seenKeys = serializedResults.map { it.key }.toSet(),
                 searchExtender = searchExtender,
                 psiModCount = PsiModificationTracker.getInstance(project).modificationCount,
-                projectBasePath = ProjectResolver.normalizePath(project.basePath ?: ""),
-                metadata = mapOf(
-                    METADATA_RESOLVED_SYMBOL to json.encodeToString(resolvedInfo),
-                    METADATA_SEARCH_EXHAUSTED to searchExhausted.toString()
+                project = project,
+                metadata = mapOf(METADATA_SEARCH_EXHAUSTED to searchExhausted.toString()),
+                serializedMetadata = mapOf(
+                    METADATA_RESOLVED_SYMBOL to PaginationService.SerializedResult(
+                        key = METADATA_RESOLVED_SYMBOL,
+                        data = json.encodeToJsonElement(resolvedInfo),
+                        symbolPointer = smartPointer,
+                        materializedSymbolId = resolvedInfo.symbolId
+                    )
                 )
             )
 

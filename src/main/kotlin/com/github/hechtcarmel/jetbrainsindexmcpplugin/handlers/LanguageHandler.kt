@@ -91,7 +91,10 @@ interface TypeHierarchyHandler : LanguageHandler<TypeHierarchyData> {
         element: PsiElement,
         project: Project,
         scope: BuiltInSearchScope = BuiltInSearchScope.PROJECT_FILES,
-        excludeGenerated: Boolean = false
+        excludeGenerated: Boolean = false,
+        directOnly: Boolean = false,
+        direction: TypeHierarchyDirection? = null,
+        page: HierarchyPageRequest? = null
     ): TypeHierarchyData?
 }
 
@@ -137,7 +140,8 @@ interface CallHierarchyHandler : LanguageHandler<CallHierarchyData> {
         direction: String,
         depth: Int,
         scope: BuiltInSearchScope = BuiltInSearchScope.PROJECT_FILES,
-        excludeGenerated: Boolean = false
+        excludeGenerated: Boolean = false,
+        page: HierarchyPageRequest? = null
     ): CallHierarchyData?
 }
 
@@ -165,8 +169,47 @@ interface SuperMethodsHandler : LanguageHandler<SuperMethodsData> {
 data class TypeHierarchyData(
     val element: TypeElementData,
     val supertypes: List<TypeElementData>,
-    val subtypes: List<TypeElementData>
+    val subtypes: List<TypeElementData>,
+    /** Raw offset for the next direct-neighbour page, or null when this direction is complete. */
+    val nextOffset: Int? = null
 )
+
+enum class TypeHierarchyDirection { SUPERTYPE, SUBTYPE }
+
+/**
+ * Bounded direct-neighbour request used by hierarchy tools.
+ *
+ * Offset is deliberately server-side continuation state rather than a wire parameter. A handler
+ * may have to re-run an index query, but it must preserve that query's encounter order while the
+ * project is unchanged and must not silently apply its historical per-level cap while [page] is
+ * present. Tools may request an expanding prefix (`offset = 0`) so smart-pointer identity, rather
+ * than a mutable raw offset, decides what is new.
+ *
+ * Deterministic hierarchy order means breadth-first level order plus stable bounded discovery order
+ * for siblings. It does not mean globally sorting an entire direct-neighbour level: an index query
+ * may be unordered and exhausting it solely to sort all siblings would violate the bounded contract.
+ */
+data class HierarchyPageRequest(val offset: Int, val limit: Int) {
+    init {
+        require(offset >= 0) { "Hierarchy page offset must not be negative" }
+        require(limit >= 0) { "Hierarchy page limit must not be negative" }
+    }
+
+    /** One look-ahead item lets a handler prove whether another page exists. */
+    val collectionLimit: Int
+        get() = (offset.toLong() + limit.toLong() + 1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+}
+
+internal fun <T> List<T>.applyHierarchyPage(request: HierarchyPageRequest?): Pair<List<T>, Int?> {
+    if (request == null) return this to null
+    if (request.limit == 0) {
+        return emptyList<T>() to if (isNotEmpty()) request.offset else null
+    }
+    val from = request.offset.coerceAtMost(size)
+    val to = (from.toLong() + request.limit.toLong()).coerceAtMost(size.toLong()).toInt()
+    val result = subList(from, to)
+    return result to if (size > to) to else null
+}
 
 /**
  * Represents a type element in a hierarchy.
@@ -178,7 +221,8 @@ data class TypeElementData(
     val line: Int?,
     val kind: String,
     val language: String,
-    val supertypes: List<TypeElementData>? = null
+    val supertypes: List<TypeElementData>? = null,
+    val pointerTarget: PsiElement? = null
 )
 
 /**
@@ -190,7 +234,9 @@ data class ImplementationData(
     val line: Int,
     val column: Int,
     val kind: String,
-    val language: String
+    val language: String,
+    val qualifiedName: String? = null,
+    val pointerTarget: PsiElement? = null
 )
 
 /**
@@ -198,7 +244,9 @@ data class ImplementationData(
  */
 data class CallHierarchyData(
     val element: CallElementData,
-    val calls: List<CallElementData>
+    val calls: List<CallElementData>,
+    /** Raw offset for the next direct-neighbour page, or null when this level is complete. */
+    val nextOffset: Int? = null
 )
 
 /**
@@ -210,7 +258,8 @@ data class CallElementData(
     val line: Int,
     val column: Int,
     val language: String,
-    val children: List<CallElementData>? = null
+    val children: List<CallElementData>? = null,
+    val pointerTarget: PsiElement? = null
 )
 
 /**
@@ -224,7 +273,8 @@ data class SymbolData(
     val line: Int,
     val column: Int,
     val containerName: String?,
-    val language: String
+    val language: String,
+    val pointerTarget: PsiElement
 )
 
 /**
@@ -245,7 +295,8 @@ data class MethodData(
     val file: String,
     val line: Int,
     val column: Int,
-    val language: String
+    val language: String,
+    val pointerTarget: PsiElement? = null
 )
 
 /**
@@ -261,7 +312,8 @@ data class SuperMethodData(
     val column: Int?,
     val isInterface: Boolean,
     val depth: Int,
-    val language: String
+    val language: String,
+    val pointerTarget: PsiElement? = null
 )
 
 /**

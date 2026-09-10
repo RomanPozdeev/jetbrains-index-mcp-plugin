@@ -136,6 +136,11 @@ Download the [latest release](https://plugins.jetbrains.com/plugin/29174-ide-ind
 4. **Use the tool window** (bottom panel: "Index MCP Server") to copy configuration or monitor commands
 5. **Change port** (optional): Click "Change port, disable tools" in the toolbar or go to <kbd>Settings</kbd> > <kbd>Tools</kbd> > <kbd>Index MCP Server</kbd>
 
+> **After installing or updating the plugin:** reconnect or restart the MCP client after the IDE
+> loads the new plugin. Clients such as Codex cache their `ALL_TOOLS` registry, so an existing
+> connection can keep an older schema even though a fresh `tools/list` is correct. The server
+> deliberately advertises `listChanged: false` until notifications work on every transport.
+
 ### Using the "Install on Coding Agents" Button
 
 The easiest way to configure your AI assistant:
@@ -258,7 +263,82 @@ Each JetBrains IDE has a unique default port and server name to allow running mu
 
 ## Exposed Tools
 
-The plugin provides **52 MCP tools** organized by availability. Tools marked *(disabled by default)* can be enabled in <kbd>Settings</kbd> > <kbd>Tools</kbd> > <kbd>Index MCP Server</kbd> > <kbd>Exposed Tools</kbd>.
+The plugin provides **54 MCP tools** organized by availability. Tools marked *(disabled by default)* can be enabled in <kbd>Settings</kbd> > <kbd>Tools</kbd> > <kbd>Index MCP Server</kbd> > <kbd>Exposed Tools</kbd>.
+
+### Opaque symbol handles
+
+Semantic discovery results include an opaque `symbolId`. Pass that ID back instead of
+`file` + `line` + `column` (or `language` + `symbol`) to target the exact declaration in
+`ide_find_references`, `ide_find_definition`, `ide_symbol_info`, the hierarchy tools, and
+symbol-oriented refactorings (`ide_refactor_rename`, `ide_change_signature`,
+`ide_edit_member`, `ide_replace_member`, and `ide_refactor_safe_delete`). This is especially
+useful for overloads and local symbols. Reusing a particular handle remains stable when edits move
+the declaration to another line or rename it.
+
+The ID contains no file path or symbol data. The running MCP server keeps an IntelliJ
+`SmartPsiElementPointer` in a 4,096-entry access-order LRU with a one-hour inactivity TTL. IDs
+belong to one exact project instance and are cleared whenever the MCP server restarts. If the
+file/declaration was deleted, the pointer can no longer be restored, the ID expired, or it came
+from another project/server session, the tool returns `SYMBOL_ID_EXPIRED`; it never guesses a
+nearby element. Successful refactorings return `updatedSymbol` (including the retained or
+replacement ID and current metadata); safe delete returns `invalidatedSymbolId`.
+
+`symbolId` is a session handle, not a canonical symbol identity. Binding the same PSI declaration
+twice may produce two different IDs that remain valid at the same time. Never compare IDs to decide
+whether two results represent the same declaration; compare semantic metadata or resolve them.
+
+Target-aware semantic and symbol-refactoring tools also accept an additive structured selector.
+Exactly one nested variant is allowed, and `target` cannot be mixed with legacy top-level selectors
+(including tool-specific selectors such as `className`):
+
+```json
+{ "target": { "symbolId": "sym_..." } }
+{ "target": { "position": { "file": "src/Foo.kt", "line": 12, "column": 9 } } }
+{ "target": { "qualifiedName": "com.example.Foo#bar", "language": "Java" } }
+```
+
+Existing top-level `symbolId`, `file`/`line`/`column`, and `language`/`symbol` requests remain
+supported.
+
+### Safe previews and bounded semantic results
+
+`ide_refactor_rename`, `ide_refactor_safe_delete`, and `ide_change_signature` accept
+`dryRun: true`. A preview resolves and validates the same target, searches usages and conflicts,
+and returns `dryRun`, `canApply`, current target metadata, `plannedChange`, `affectedFiles`, usage
+and conflict counts, warnings, and `elapsedMs`. It never enters the refactoring/source-write phase,
+saves documents, or adds an undo command, so callers can inspect the plan before sending the same
+request without `dryRun`.
+
+Without `maxNodes` or `cursor`, hierarchy tools retain the legacy nested trees and per-handler
+limits. Set `maxNodes` to opt into bounded breadth-first pages. Each paged node has a traversal-local
+`nodeId`, `parentId`, and `depth` describing its first-discovery parent independently of `symbolId`.
+`returnedNodes` excludes the repeated root; type pages also expose combined order in `traversal`.
+Continue with `cursor`. If a retention limit is reached, the computed page is still returned with
+`hasMore: true`, no cursor, and `truncationReason`; narrow the query to continue.
+
+Cursors are scoped to the exact MCP session/project, kept for ten idle minutes in a separate cache
+of at most 128 snapshots and ten per traversal, with aggregate pointer/text budgets. Returned
+handles are refreshed on each page. Stateless HTTP progress is reported through these pages.
+
+`ide_diagnostics` accepts either one `file` or a non-empty `files` array. Multi-file analysis uses
+one shared timeout budget, aggregates problems, and reports `mode`, `fresh`, `timedOut`, and
+`message` for every requested file in `fileAnalyses`; location filters and intention lookup remain
+single-file only. Code problems share a 100-item response cap. `problemsTruncated` marks omitted
+problems, and each `fileAnalyses` entry reports its returned `problemCount` and `problemsTruncated`.
+Freshness is not completeness: re-query truncated files individually, with narrower line ranges
+if necessary. `ide_sync_files` can target paths that have already been deleted: it refreshes the
+nearest existing parent inside the selected project/content root and reports `requestedPaths`,
+actual `refreshedRoots`, and `deletedPaths`. Absolute paths, traversal, and symlink escapes are
+rejected.
+
+`ide_file_structure` keeps its original formatted `structure` string and also returns structured
+`nodes`. Each node contains `name`, `kind`, `signature`, `modifiers`, `line`, `endLine`, `children`,
+and a nullable `symbolId` bound directly to that PSI element. Kotlin class metadata distinguishes
+interfaces, classes, enums, annotations, and objects semantically and uses Kotlin fully qualified
+names when available. All outline nodes are retained, but at most 500 receive handles per response;
+`symbolIdsTruncated` and `symbolIdsOmitted` report handle-budget omissions. Anonymous implementations
+have a readable location-based name such as
+`<anonymous implementation of SomeInterface at File.kt:42>` and `qualifiedName: null`.
 
 ### Universal Tools
 
@@ -266,17 +346,17 @@ These tools work in all supported JetBrains IDEs.
 
 | Tool | Description |
 |------|-------------|
-| `ide_find_references` | Find all references to a symbol across the entire project, optionally restricted to path globs via `paths` |
-| `ide_find_definition` | Find the definition/declaration location of a symbol |
-| `ide_symbol_info` | Resolved signature and documentation for the symbol at a position — parameter and return types expanded to fully qualified names (Java), structured `parameters`, modifiers, containing declaration, and the doc comment as plain text, without reading the file *(disabled by default)* |
-| `ide_find_class` | Search for classes/interfaces by name with camelCase/substring/wildcard matching |
+| `ide_find_references` | Find all references to a symbol across the entire project, optionally restricted to path globs via `paths`; accepts `symbolId` |
+| `ide_find_definition` | Find the definition/declaration location of a symbol; returns and accepts `symbolId` |
+| `ide_symbol_info` | Resolved signature and documentation for a symbol, addressable by `symbolId` or position — parameter and return types expanded to fully qualified names (Java), structured `parameters`, modifiers, containing declaration, and the doc comment as plain text, without reading the file *(disabled by default)* |
+| `ide_find_class` | Search for classes/interfaces by name with camelCase/substring/wildcard matching; every result includes `symbolId` |
 | `ide_find_file` | Search for files by name using IDE's file index |
-| `ide_find_symbol` | Search for symbols (classes, methods, fields, functions) by name with IntelliJ Go to Symbol matching *(disabled by default)* |
+| `ide_find_symbol` | Search for symbols (classes, methods, fields, functions) by name with IntelliJ Go to Symbol matching; every result includes `symbolId` *(disabled by default)* |
 | `ide_search_text` | Text search using IntelliJ Find in Files with context filtering (substring and regex matching), optionally restricted to path globs via `paths` |
-| `ide_diagnostics` | Analyze file problems with fresh editor diagnostics for open files or public batch diagnostics for closed files, plus optional build/test results; intentions are best-effort |
+| `ide_diagnostics` | Analyze one `file` or up to 100 unique `files` under one shared timeout budget, with fresh editor diagnostics for open files or public batch diagnostics for closed files, plus optional build/test results; intentions are best-effort and single-file only |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata: a `complete` flag plus per-file `analyzed`/`timed_out`/`failed`/`skipped`/`not_analyzed` states, so an empty result can never be mistaken for a clean project. Long analyses return an `analysisId` to poll *(disabled by default)* |
 | `ide_index_status` | Check if the IDE is in dumb mode or smart mode |
-| `ide_sync_files` | Force sync IDE's virtual file system and PSI cache with external file changes |
+| `ide_sync_files` | Force sync IDE's virtual file system and PSI cache with external file changes, including deleted targets via their nearest existing parent |
 | `ide_reload_project` | Force-reload Maven or Gradle build model after modifying `pom.xml`/`build.gradle` *(disabled by default)* |
 | `ide_link_build_system` | Link an unlinked Maven/Gradle project for dependency resolution *(disabled by default)* |
 | `ide_import_modules` | Import external Maven project directories as modules into the current IntelliJ window *(disabled by default, requires Maven plugin)* |
@@ -292,17 +372,17 @@ These tools work in all supported JetBrains IDEs.
 | `ide_open_project` | Open a project by absolute path and wait until indexing completes (configurable timeout); returns immediately if already open *(disabled by default)* |
 | `ide_install_plugin` | Install a plugin zip into the IDE, replacing any existing version — auto-detects `build/distributions/*.zip` when no path is given *(disabled by default)* |
 | `ide_restart` | Restart the IDE — terminates the MCP connection; call after `ide_install_plugin` *(disabled by default)* |
-| `ide_refactor_rename` | Rename a symbol or file and update all references across the project (all languages; use `targetType` for explicit file mode) |
+| `ide_refactor_rename` | Preview with `dryRun`, or rename a symbol by `symbolId`/position (or a file) and update all references across the project (all languages; use `targetType` for explicit file mode) |
 | `ide_move_file` | Move a file to a new directory, applying language-aware reference/package updates when the IDE provides a semantic move backend |
 | `ide_reformat_code` | Reformat code using project code style with import optimization *(disabled by default)* |
 | `ide_optimize_imports` | Optimize imports without reformatting code *(disabled by default)* |
 | `ide_structural_search_replace` | Pattern-based code search and transformation using IntelliJ's Structural Search and Replace engine, optionally restricted to path globs via `paths` (Java, Kotlin) *(disabled by default)* |
 | `ide_create_file` | Create a new source file with content, immediately indexed by IntelliJ — use instead of Write for `.java`, `.kt`, `.ts`, `.tsx`, `.py` files *(disabled by default)* |
 | `ide_replace_text_in_file` | Find and replace text in a file using IntelliJ's Document API — changes immediately visible to index and PSI without `ide_sync_files` *(disabled by default)* |
-| `ide_change_signature` | Change method signature with automatic caller updates (Java only) *(disabled by default)* |
-| `ide_edit_member` | Replace an entire member declaration (signature + body) with new content (Java, Kotlin) *(disabled by default)* |
+| `ide_change_signature` | Preview with `dryRun`, or change a method signature by `symbolId` or position with automatic caller updates (Java, Kotlin JVM functions) *(disabled by default)* |
+| `ide_edit_member` | Replace an entire member declaration (signature + body) by `symbolId` or member selector (Java, Kotlin) *(disabled by default)* |
 | `ide_insert_member` | Insert a new member at a structural position in a class or file (Java, Kotlin) *(disabled by default)* |
-| `ide_replace_member` | Replace a method body or field initializer only, preserving the signature (Java, Kotlin) *(disabled by default)* |
+| `ide_replace_member` | Replace a method body or field initializer by `symbolId` or member selector, preserving the signature (Java, Kotlin) *(disabled by default)* |
 
 ### Extended Tools (Language-Aware)
 
@@ -310,11 +390,11 @@ These tools activate based on available language plugins:
 
 | Tool | Description | Languages |
 |------|-------------|-----------|
-| `ide_type_hierarchy` | Get the complete type hierarchy (supertypes and subtypes) | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
-| `ide_call_hierarchy` | Analyze method call relationships (callers or callees) | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
-| `ide_find_implementations` | Find all implementations of an interface or abstract method | Java, Kotlin, Python, JS/TS, PHP, Rust |
-| `ide_find_super_methods` | Find the full inheritance hierarchy of methods that a method overrides/implements | Java, Kotlin, Python, JS/TS, PHP |
-| `ide_file_structure` | Get hierarchical file structure (similar to IDE's Structure view) with start and end line numbers for each element *(disabled by default)* | Java, Kotlin, Python, JS/TS, PHP, Markdown |
+| `ide_type_hierarchy` | Get a bounded, cursor-paginated type hierarchy in deterministic breadth-first order, accepting and returning `symbolId` | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
+| `ide_call_hierarchy` | Analyze callers or callees in bounded, cursor-paginated breadth-first order, accepting and returning `symbolId` | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
+| `ide_find_implementations` | Find all implementations of an interface or abstract method, accepting and returning `symbolId` | Java, Kotlin, Python, JS/TS, PHP, Rust |
+| `ide_find_super_methods` | Find the full inheritance hierarchy of methods that a method overrides/implements, accepting and returning `symbolId` | Java, Kotlin, Python, JS/TS, PHP |
+| `ide_file_structure` | Get both the compatible formatted `structure` and structured PSI-bound `nodes` with ranges and optional `symbolId` *(disabled by default)* | Java, Kotlin, Python, JS/TS, PHP, Markdown |
 
 PHP file structure support requires the PHP plugin and is available in PhpStorm or IntelliJ IDEA Ultimate with the PHP plugin enabled.
 
@@ -324,9 +404,10 @@ PHP file structure support requires the PHP plugin and is available in PhpStorm 
 |------|-------------|
 | `ide_list_tests` | List all test methods/classes discovered by the IDE's test framework extension points (JUnit, TestNG, etc.) *(disabled by default, requires Java plugin)* |
 | `ide_convert_java_to_kotlin` | Convert Java files to Kotlin using IntelliJ's built-in converter *(disabled by default, requires Java + Kotlin plugins)* |
-| `ide_refactor_safe_delete` | Safely delete an element, checking for usages first (Java/Kotlin only) |
+| `ide_refactor_safe_delete` | Preview with `dryRun`, or safely delete an element by `symbolId` or position after checking usages (Java/Kotlin only) |
 
-> **Note**: Refactoring tools modify source files. All changes support undo via <kbd>Ctrl/Cmd+Z</kbd>.
+> **Note**: Applied refactorings modify source files and support undo via
+> <kbd>Ctrl/Cmd+Z</kbd>. `dryRun: true` previews do not modify files or create an undo command.
 
 ### Project Lifecycle Management Tools
 
@@ -391,7 +472,9 @@ For agent-heavy workflows: [recommended IDE settings](docs/recommended-ide-setti
 
 ## Multi-Project Support
 
-When multiple projects are open in a single IDE window, you must specify which project to use with the `project_path` parameter:
+When multiple projects are open in a single IDE window, specify which project to use with the
+`project_path` parameter. The exception is a symbol-ID-only call: the server routes a valid
+`symbolId` to the exact project instance that owns it.
 
 ```json
 {
@@ -407,6 +490,7 @@ When multiple projects are open in a single IDE window, you must specify which p
 
 If `project_path` is omitted:
 - **Single project open**: That project is used automatically
+- **Valid `symbolId` supplied**: Its owning project instance is used automatically
 - **Multiple projects open**: An error is returned with the list of available projects
 
 ### Workspace Projects

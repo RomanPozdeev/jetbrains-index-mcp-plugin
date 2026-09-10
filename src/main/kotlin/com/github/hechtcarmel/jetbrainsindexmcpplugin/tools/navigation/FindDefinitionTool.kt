@@ -21,6 +21,8 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class FindDefinitionTool : AbstractMcpTool() {
 
+    override val supportsUnifiedTarget: Boolean = true
+
     companion object {
         private const val DEFAULT_MAX_PREVIEW_LINES = 50
         private const val MAX_ALLOWED_PREVIEW_LINES = 500
@@ -34,6 +36,7 @@ class FindDefinitionTool : AbstractMcpTool() {
         Returns: file path, line/column of definition, code preview, and symbol name.
 
         Target (mutually exclusive):
+        - symbolId: opaque handle returned by a previous semantic call
         - file + line + column: position-based lookup
         - language + symbol: fully qualified symbol reference (supported languages: ${supportedSymbolReferenceLanguagesDescription()})
 
@@ -45,6 +48,8 @@ class FindDefinitionTool : AbstractMcpTool() {
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
+        .target()
+        .symbolId()
         .file(required = false, description = "Project-relative file path, or a dependency/library absolute path or jar:// URL previously returned by the plugin. Required for position-based lookup.")
         .lineAndColumn(required = false)
         .languageAndSymbol(required = false)
@@ -53,6 +58,7 @@ class FindDefinitionTool : AbstractMcpTool() {
         .build()
 
     override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
+        val requestedSymbolId = optionalStringArg(arguments, ParamNames.SYMBOL_ID)
         val fullElementPreview = arguments[ParamNames.FULL_ELEMENT_PREVIEW]?.jsonPrimitive?.content?.toBoolean() ?: false
         val maxPreviewLines = (arguments[ParamNames.MAX_PREVIEW_LINES]?.jsonPrimitive?.int ?: DEFAULT_MAX_PREVIEW_LINES)
             .coerceIn(1, MAX_ALLOWED_PREVIEW_LINES)
@@ -66,18 +72,24 @@ class FindDefinitionTool : AbstractMcpTool() {
 
             // Symbol-based resolution returns the declaration directly (PsiNamedElement).
             // Position-based resolution returns a leaf token that needs reference resolution.
-            val resolvedElement = element as? PsiNamedElement
+            val resolvedElement = if (requestedSymbolId != null) element else element as? PsiNamedElement
                 ?: (PsiUtils.resolveTargetElement(element)
                     ?: return@suspendingReadAction createErrorResult(ErrorMessages.SYMBOL_NOT_RESOLVED))
 
             // Prefer source files (.java) over compiled files (.class) for library classes,
             // and hop past a compiled stand-in that has no virtual file of its own.
-            val effectiveTarget = PsiUtils.resolveNavigationTarget(resolvedElement)
+            val effectiveTarget = if (requestedSymbolId != null) resolvedElement else
+                PsiUtils.resolveNavigationTarget(resolvedElement)
 
             // Handle package/directory references (e.g., cursor on package segment in import statement)
             if (effectiveTarget is PsiDirectory) {
                 val dirPath = getRelativePath(project, effectiveTarget.virtualFile)
                 return@suspendingReadAction createJsonResult(DefinitionResult(
+                    symbolId = bindExactSymbolId(
+                        project,
+                        effectiveTarget,
+                        requestedSymbolId
+                    ),
                     file = dirPath,
                     line = 1,
                     column = 1,
@@ -99,6 +111,11 @@ class FindDefinitionTool : AbstractMcpTool() {
                     if (dir != null) {
                         val dirPath = getRelativePath(project, dir.virtualFile)
                         return@suspendingReadAction createJsonResult(DefinitionResult(
+                            symbolId = bindExactSymbolId(
+                                project,
+                                effectiveTarget,
+                                requestedSymbolId
+                            ),
                             file = dirPath,
                             line = 1,
                             column = 1,
@@ -124,9 +141,11 @@ class FindDefinitionTool : AbstractMcpTool() {
                 document.getLineStartOffset(targetLine - 1) + 1
 
             // Get preview - either full element code or a few lines around the definition
-            val preview = if (fullElementPreview) {
+            // Implicit record/enum methods may have no own source text. Use source context for
+            // those declarations while preserving the exact handle and its source position.
+            val fullText = if (fullElementPreview) effectiveTarget.text else null
+            val preview = if (fullText != null) {
                 // Extract the complete element code, truncated to maxPreviewLines
-                val fullText = effectiveTarget.text
                 val lines = fullText.lines()
                 if (lines.size > maxPreviewLines) {
                     lines.take(maxPreviewLines).joinToString("\n") +
@@ -156,6 +175,11 @@ class FindDefinitionTool : AbstractMcpTool() {
             }
 
             createJsonResult(DefinitionResult(
+                symbolId = bindExactSymbolId(
+                    project,
+                    effectiveTarget,
+                    requestedSymbolId
+                ),
                 file = getRelativePath(project, targetFile),
                 line = targetLine,
                 column = targetColumn,

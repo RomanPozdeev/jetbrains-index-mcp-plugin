@@ -12,6 +12,8 @@ Follow every rule here before opening a pull request.
 ```bash
 ./gradlew test -Ptier=unit   # fast headless tier, no IntelliJ Platform (~20 s)
 ./gradlew test               # everything, platform tests included (~40 s)
+# opt-in real Kotlin PSI/refactoring regressions
+./gradlew test -PkotlinPluginTests=true --tests '*Kotlin*BehaviorTest'
 ./gradlew runIde             # launch sandboxed IDE with plugin installed
 ./scripts/check-pr.sh        # pre-push validation — run before every push
 ```
@@ -447,41 +449,51 @@ call sites". It is thin in these areas:
   lookup propagates `IndexNotReadyException` (which the tool layer turns into retry guidance)
   instead of misreporting "Class not found", but no test yet drives an index-backed tool
   end-to-end through dumb mode to prove it degrades gracefully at the MCP boundary.
-- **No whole-file golden fixtures.** `configureByFile` / `checkResultByFile` are unused, so
-  formatting damage and collateral edits outside the asserted region are invisible. This matters
-  most for `ide_reformat_code` and `ide_optimize_imports`.
+- **Whole-file assertions remain limited.** The Java/Kotlin body-replacement formatting fixtures
+  compare complete saved files and assert that `ide_reformat_code` makes no further changes.
+  Most other edit tests assert only fragments, leaving collateral formatting damage unverified.
 - **Reflection-based language handlers are largely unverified.** Python, Go, PHP and Rust handlers
   are reached only through reflection against plugins absent from the test classpath. The Python
-  hierarchy and call-hierarchy handlers have no automated coverage at all — verify changes to them
-  in the corresponding IDE by hand.
-- **No test exercises real Kotlin PSI.** The Kotlin plugin is not on the test classpath, so every
-  Kotlin-specific code path — light-class handling in `JavaHandlers.kt`, `KtProperty` resolution in
-  `JavaSymbolReferenceHandler`, the Kotlin branches of the refactoring tools — is covered only by
-  unit tests over the surrounding helpers, or not at all. Verify Kotlin changes by hand in the IDE.
-  Two routes have been tried and both are closed:
-  - `testBundledPlugin("org.jetbrains.kotlin")` fails `compileTestKotlin`. The bundled plugin's jars
-    carry newer Kotlin metadata than the generation this platform build compiles against — the same
-    pin documented in `gradle/libs.versions.toml` and in `docs/mcp-kotlin-sdk-migration.md` §11.1.
-  - Filtering those jars off the `compileTestKotlin` classpath does compile, and the plugin loads
-    (`PluginDetectors.kotlin.isAvailable` is true, fixtures parse to real Kotlin PSI). But a real
-    `ReferencesSearch` then dies inside the platform's `KotlinReferencesSearcher` with
-    `NoSuchMethodError: SequencesKt.sequenceOf`, via `LightClassUtil.getWrappingClasses`. A real IDE
-    loads bundled plugins through isolated per-plugin classloaders with matched dependencies; a
-    Gradle test JVM flattens them onto one classpath.
+  hierarchy and native caller lookup still need verification in the corresponding IDE. The
+  post-native caller collection path has neutral-PSI regression fixtures for scope filtering,
+  limits, and declaration identity. `ReflectedHierarchyCancellationBehaviorTest` exercises actual
+  collectors with neutral PSI, query executors, and duck-typed reflection fixtures for cancellation
+  and index-unavailability. These tests do not verify the optional plugins' native search APIs.
+- **Real Kotlin PSI tests are opt-in.** `-PkotlinPluginTests=true` loads the bundled Kotlin plugin
+  for tests. `KotlinReplaceMemberFormattingBehaviorTest` exercises block/expression bodies and
+  property initializers, exact saved text, returned body lines, and full-file formatter idempotence.
+  `KotlinRenameBaseBehaviorTest` covers headless base selection, Kotlin/Java interfaces,
+  overrides and call sites, handles from super-method queries, preview with and without a base,
+  and aborting failed discovery. It guards the interactive entry point because Kotlin's unit-test
+  mode auto-confirms the super-method chooser.
+  `KotlinChangeSignatureBehaviorTest` covers source-position and semantic-handle lookup,
+  function rename, adding an `Int` parameter with a caller default across an interface and
+  override, unchanged preview source, and silent processor aborts. It verifies that selecting
+  the base preserves the original override handle and checks the base source file's writability.
+  Post-apply verification must resolve a fresh light method from a source smart pointer because
+  a retained light method can report the old signature after successful source edits.
+  Extension/suspend parameter mapping, Kotlin-only type syntax, and other change-signature
+  options still lack dedicated Kotlin behavior coverage.
+  The remaining Kotlin hierarchy, safe-delete, member-editing, and outline behavior tests run in
+  the same source set. Other Kotlin-specific paths still require dedicated coverage or manual IDE
+  verification. The opt-in configuration excludes newer plugin metadata from test compilation and
+  uses the IDE's matching stdlib at runtime; an older stdlib causes
+  `NoSuchMethodError: SequencesKt.sequenceOf` in formatter and usage-search paths.
 - **Some tools are still never executed by any test**, only schema- and response-shape-checked:
   `ide_build_project`, `ide_reload_project`, `ide_import_modules`, `ide_open_workspace`,
   `ide_restart`, `ide_lifecycle_log`, `ide_set_lifecycle_log_file`, and `ide_run_tests` (only its
   `parseTarget` helper is covered). `ide_reformat_code` has error paths only. Adding a behavior
   test for one is a genuinely useful first contribution — see the checklist above for the shape.
-- **`ide_symbol_info` is tested only on its `java_psi` tier.** The `quick_navigation` and
-  `element_text` fallbacks in `SymbolSignatureResolver` have no automated coverage. A TypeScript
-  fixture does reach `quick_navigation`, but adding one made a JS/TS background task throw on an
+- **`ide_symbol_info`'s `quick_navigation` tier still lacks stable automated coverage.**
+  Java signatures have behavior coverage; the opt-in `KotlinSymbolInfoBehaviorTest` exercises
+  `element_text` with annotations, KDoc, quoted names, and a plain declaration. It asserts the
+  actual `signatureSource`, so a different resolution tier cannot silently satisfy the test.
+  A TypeScript fixture does reach `quick_navigation`, but adding one made a JS/TS background task throw on an
   application pooled thread during teardown — `BackendThreadPoolExecutor.afterExecute` logged it
   and `TestLoggerFactory$TestLogger.error` then failed inside `AsyncLog`. The build stayed green
   (the throw lands outside any test method), so it was a permanent unexplained error in the log
-  rather than a failure; the test was removed instead of shipped. `element_text` needs an element
-  no documentation provider answers for, which the fixture platform does not produce reliably.
-  Verify both tiers by hand in the corresponding IDE.
+  rather than a failure; the test was removed instead of shipped.
+  Verify `quick_navigation` by hand in the corresponding IDE.
 - **`SafeDeleteTool` cannot see references in files outside any content root.** The usage
   search scope only covers content roots, so a reference living outside them will not block
   deletion. (The former fail-open exception handling — treating a failed `ReferencesSearch` as

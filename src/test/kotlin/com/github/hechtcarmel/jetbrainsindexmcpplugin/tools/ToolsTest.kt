@@ -470,6 +470,7 @@ class ToolsTest : McpPlatformTestCase() {
             put("language", "JavaScript")
             put("symbol", fixtureSymbol("barrels/realistic/config/loader.ts", "loadPluginConfig"))
             put("direction", "callers")
+            put("maxNodes", 20)
         })
 
         assertFalse("Realistic index barrel callers should be routed through JS/TS symbol resolution", result.isFailure)
@@ -481,6 +482,9 @@ class ToolsTest : McpPlatformTestCase() {
             20,
             payload.calls.size
         )
+        assertEquals(20, payload.returnedNodes)
+        assertTrue("Additional callers should remain available through pagination", payload.hasMore)
+        assertNotNull("A capped first page must provide a continuation cursor", payload.cursor)
         assertTrue(
             "Fixture should exercise the >20 direct test callers regression",
             callersByName.keys.any { it.startsWith("loadPluginConfigFromTest") }
