@@ -7,6 +7,7 @@
 ### Added
 
 - Add opt-in bounded hierarchy pagination with parent/depth identity and session-scoped cursors while preserving legacy trees and limits.
+- Add structured file-outline nodes alongside formatted text, with exact declaration handles and explicit handle-budget metadata.
 
 ## [5.15.0] - 2026-09-15
 

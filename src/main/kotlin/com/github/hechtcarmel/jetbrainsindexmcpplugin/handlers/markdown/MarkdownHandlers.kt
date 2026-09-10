@@ -96,7 +96,8 @@ class MarkdownStructureHandler : BaseMarkdownHandler<List<StructureNode>>(), Str
                 level = header.level,
                 name = headerName(header),
                 line = getLineNumber(project, header),
-                endLine = getEndLineNumber(project, header)
+                endLine = getEndLineNumber(project, header),
+                pointerTarget = header
             )
 
             while (stack.isNotEmpty() && stack.last().level >= node.level) {
@@ -120,6 +121,7 @@ class MarkdownStructureHandler : BaseMarkdownHandler<List<StructureNode>>(), Str
         val name: String,
         val line: Int,
         val endLine: Int? = null,
+        val pointerTarget: PsiElement,
         val children: MutableList<MutableHeadingNode> = mutableListOf()
     ) {
         fun toStructureNode(): StructureNode =
@@ -130,7 +132,8 @@ class MarkdownStructureHandler : BaseMarkdownHandler<List<StructureNode>>(), Str
                 signature = null,
                 line = line,
                 endLine = endLine,
-                children = children.map { it.toStructureNode() }
+                children = children.map { it.toStructureNode() },
+                pointerTarget = pointerTarget
             )
     }
 }

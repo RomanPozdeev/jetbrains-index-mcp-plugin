@@ -766,6 +766,11 @@ abstract class AbstractMcpTool : McpTool {
         }
     }
 
+    /** Binds a declaration's navigation target while preserving exact handle identity. */
+    @RequiresReadLock
+    protected fun bindNavigationSymbolId(project: Project, element: PsiElement, preferredId: String? = null): String =
+        bindExactSymbolId(project, PsiUtils.resolveNavigationTarget(element), preferredId)
+
     /** Preserve an already resolved handle's PSI identity, including non-named and light elements. */
     @RequiresReadLock
     protected fun bindExactSymbolId(project: Project, element: PsiElement, preferredId: String? = null): String =

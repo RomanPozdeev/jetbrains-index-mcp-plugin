@@ -1048,6 +1048,7 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
         } catch (e: ClassNotFoundException) {
             LOG.warn("Python PSI class not found: ${e.message}")
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Failed to extract Python file structure: ${e.message}, ${e.javaClass.simpleName}")
         }
 
@@ -1094,6 +1095,8 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
             }
 
         } catch (e: Exception) {
+
+            e.rethrowIfControlFlow()
             LOG.warn("Failed to extract Python class structure: ${e.message}")
         }
 
@@ -1106,7 +1109,8 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
             signature = buildClassSignature(pyClass),
             line = getLineNumber(project, pyClass) ?: 0,
             endLine = getEndLineNumber(project, pyClass),
-            children = children.sortedBy { it.line }
+            children = children.sortedBy { it.line },
+            pointerTarget = pyClass
         )
     }
 
@@ -1119,7 +1123,8 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
             modifiers = getPythonModifiers(pyFunction),
             signature = buildFunctionSignature(pyFunction),
             line = getLineNumber(project, pyFunction) ?: 0,
-            endLine = getEndLineNumber(project, pyFunction)
+            endLine = getEndLineNumber(project, pyFunction),
+            pointerTarget = pyFunction
         )
     }
 
@@ -1140,6 +1145,7 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
                 modifiers.add("@classmethod")
             }
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             // Ignore
         }
 
@@ -1161,6 +1167,7 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
             }
             ""
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             ""
         }
     }
@@ -1177,12 +1184,14 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
                     val getNameMethod = param.javaClass.getMethod("getName")
                     getNameMethod.invoke(param) as? String
                 } catch (e: Exception) {
+                    e.rethrowIfControlFlow()
                     null
                 }
             }.joinToString(", ")
 
             "($params)"
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             "()"
         }
     }

@@ -788,7 +788,8 @@ class PhpStructureHandler : BasePhpHandler<List<StructureNode>>(), StructureHand
     private data class NamespaceRegion(
         val name: String,
         val line: Int,
-        val endLine: Int? = null
+        val endLine: Int? = null,
+        val pointerTarget: PsiElement
     )
 
     private inner class PhpStructureClassifier : IdeStructureViewExtractor.Classifier {
@@ -830,7 +831,8 @@ class PhpStructureHandler : BasePhpHandler<List<StructureNode>>(), StructureHand
                     modifiers = emptyList(),
                     signature = null,
                     line = namespace.line,
-                    endLine = namespace.endLine
+                    endLine = namespace.endLine,
+                    pointerTarget = namespace.pointerTarget
                 )
             }
         }
@@ -850,7 +852,8 @@ class PhpStructureHandler : BasePhpHandler<List<StructureNode>>(), StructureHand
                 signature = null,
                 line = namespace.line,
                 endLine = namespace.endLine,
-                children = namespaceChildren
+                children = namespaceChildren,
+                pointerTarget = namespace.pointerTarget
             )
         }
 
@@ -868,7 +871,12 @@ class PhpStructureHandler : BasePhpHandler<List<StructureNode>>(), StructureHand
                 val name = namespaceName(namespace) ?: return@mapNotNull null
                 val line = getLineNumber(project, namespace) ?: return@mapNotNull null
                 val endLine = getEndLineNumber(project, namespace)
-                NamespaceRegion(name = name, line = line, endLine = endLine)
+                NamespaceRegion(
+                    name = name,
+                    line = line,
+                    endLine = endLine,
+                    pointerTarget = namespace
+                )
             }
             .distinct()
             .sortedBy { it.line }
@@ -1186,6 +1194,7 @@ class PhpStructureHandler : BasePhpHandler<List<StructureNode>>(), StructureHand
         return try {
             target.javaClass.getMethod(methodName).invoke(target) as? Boolean ?: false
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             false
         }
     }
@@ -1198,6 +1207,7 @@ class PhpStructureHandler : BasePhpHandler<List<StructureNode>>(), StructureHand
         return try {
             target.javaClass.getMethod(methodName).invoke(target)
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             null
         }
     }

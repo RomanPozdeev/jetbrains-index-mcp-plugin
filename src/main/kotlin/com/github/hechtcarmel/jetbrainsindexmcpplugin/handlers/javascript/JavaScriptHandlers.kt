@@ -2555,6 +2555,7 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
         } catch (e: ClassNotFoundException) {
             LOG.warn("JavaScript PSI class not found: ${e.message}")
         } catch (e: Exception) {
+            e.rethrowIfControlFlow()
             LOG.warn("Failed to extract JavaScript file structure: ${e.message}, ${e.javaClass.simpleName}")
         }
 
@@ -2584,7 +2585,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
                     children.add(extractMethodStructure(func, project))
                 }
             }
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             // getFunctions() not available, try children scan
              try {
                  if (jsFunctionClass != null) {
@@ -2596,7 +2598,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
                          }
                      }
                  }
-             } catch (_: Exception) {
+             } catch (failure: Exception) {
+                 failure.rethrowIfControlFlow()
                  // Ignore
              }
         }
@@ -2610,7 +2613,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
                     children.add(extractFieldStructure(field, project))
                 }
             }
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             // getFields() not available, skip
         }
 
@@ -2628,7 +2632,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             signature = buildClassSignature(jsClass),
             line = getLineNumber(project, jsClass) ?: 0,
             endLine = getEndLineNumber(project, jsClass),
-            children = children.sortedBy { it.line }
+            children = children.sortedBy { it.line },
+            pointerTarget = jsClass
         )
     }
 
@@ -2640,7 +2645,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = getJavaScriptModifiers(jsFunction),
             signature = buildFunctionSignature(jsFunction),
             line = getLineNumber(project, jsFunction) ?: 0,
-            endLine = getEndLineNumber(project, jsFunction)
+            endLine = getEndLineNumber(project, jsFunction),
+            pointerTarget = jsFunction
         )
     }
 
@@ -2652,7 +2658,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = getJavaScriptModifiers(jsFunction),
             signature = buildFunctionSignature(jsFunction),
             line = getLineNumber(project, jsFunction) ?: 0,
-            endLine = getEndLineNumber(project, jsFunction)
+            endLine = getEndLineNumber(project, jsFunction),
+            pointerTarget = jsFunction
         )
     }
 
@@ -2664,7 +2671,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = emptyList(),
             signature = null,
             line = getLineNumber(project, jsVariable) ?: 0,
-            endLine = getEndLineNumber(project, jsVariable)
+            endLine = getEndLineNumber(project, jsVariable),
+            pointerTarget = jsVariable
         )
     }
 
@@ -2676,7 +2684,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
             modifiers = getJavaScriptModifiers(field),
             signature = null,
             line = getLineNumber(project, field) ?: 0,
-            endLine = getEndLineNumber(project, field)
+            endLine = getEndLineNumber(project, field),
+            pointerTarget = field
         )
     }
 
@@ -2704,10 +2713,12 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
                 if (isStaticMethod.invoke(attrList, "abstract") as? Boolean == true) {
                     modifiers.add("abstract")
                 }
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                failure.rethrowIfControlFlow()
                 // hasModifier not available
             }
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             // No attribute list available
         }
         return modifiers
@@ -2722,7 +2733,8 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
                 }
                 if (names.isNotEmpty()) "extends ${names.joinToString(", ")}" else ""
             } else ""
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             ""
         }
     }
@@ -2738,13 +2750,15 @@ class JavaScriptStructureHandler : BaseJavaScriptHandler<List<StructureNode>>(),
                 try {
                     val getNameMethod = param.javaClass.getMethod("getName")
                     getNameMethod.invoke(param) as? String
-                } catch (_: Exception) {
+                } catch (failure: Exception) {
+                    failure.rethrowIfControlFlow()
                     null
                 }
             }.joinToString(", ")
 
             "($params)"
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            failure.rethrowIfControlFlow()
             "()"
         }
     }

@@ -138,7 +138,8 @@ object IdeStructureViewExtractor {
                 signature = info.signature?.takeIf { it.isNotBlank() },
                 line = resolvedLine ?: children.firstOrNull()?.line ?: 1,
                 endLine = resolvedEndLine,
-                children = children
+                children = children,
+                pointerTarget = value as? PsiElement
             )
         )
     }

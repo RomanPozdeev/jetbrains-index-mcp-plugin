@@ -65,6 +65,10 @@ class SymbolIdRegistry @JvmOverloads constructor(
     private val entries = LinkedHashMap<String, Entry>()
     private val counters = CacheCounters()
 
+    /** Maximum number of handles a single response may allocate. */
+    internal val responseHandleBudget: Int
+        get() = minOf(maxEntries, PaginationService.MAX_PAGE_SIZE)
+
     init {
         require(maxEntries > 0) { "maxEntries must be positive" }
         require(ttlMillis > 0) { "ttlMillis must be positive" }

@@ -204,3 +204,59 @@ Explicit pagination returns bounded breadth-first pages with traversal-local `no
 A continuation budget limit preserves the computed page and reports `truncationReason`;
 narrow the query when `hasMore=true` has no cursor. Cancellation and indexing transitions
 propagate through reflective handlers instead of completing an empty hierarchy.
+### Symbol handles for definition and symbol info
+
+`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
+coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
+When `project_path` is omitted, the handle identifies its owning open project. Handles expire
+on server restart, project close, deletion, one hour of inactivity, or eviction from the
+4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
+different IDs can identify the same declaration, so do not compare IDs for symbol equality.
+
+### Structured lookup targets
+
+`ide_find_definition` and `ide_symbol_info` also accept a nested `target` with exactly one
+variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "line": 3,
+"column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
+Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
+Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
+
+### Rename preview
+
+`ide_refactor_rename` accepts `dryRun: true` with legacy selectors, `symbolId`, or a nested
+`target`. It returns `canApply`, `target`, `plannedChange`, `affectedFiles`, `usageCount`,
+`conflictCount`, `warnings` and `elapsedMs` without writing source or saving documents.
+Preview and apply share conflict discovery and automatic rename selections. A successful
+apply returns current `updatedSymbol` metadata. The preview response assembly is shared
+with subsequent refactoring preview implementations.
+
+### Safe-delete preview
+
+`ide_refactor_safe_delete` accepts `dryRun: true` and uses the same preview response as rename.
+It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply share forced-delete
+eligibility, including files with no declarations and incomplete usage discovery; warnings describe
+these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
+ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.
+
+### Change-signature preview
+
+`ide_change_signature` accepts `symbolId`, a nested `target`, or the existing file position.
+`dryRun=true` uses public platform usage and conflict discovery without running the processor.
+The shared preview reports affected files, conflicts, read-only scope, and cases requiring
+an interactive overrider/default-value decision. Apply returns updated symbol metadata.
+
+### Symbol handles in search and member editing
+
+Class, symbol, reference, implementation, and super-method queries expose exact declaration handles.
+Reference and implementation queries and member edits accept the shared target selectors.
+Cached searches keep `stale=true` after PSI edits and rebind exact smart pointers on returned pages;
+deleted targets and another project/session are rejected. Member edits return updated metadata.
+Kotlin abstract/sealed declarations retain `ABSTRACT_CLASS`; anonymous implementations have
+a useful source location without an invented qualified name.
+
+### Structured file outlines
+
+`ide_file_structure` keeps the formatted `structure` string and adds `nodes` with nested
+declarations, source ranges, signatures, modifiers, and optional exact `symbolId` handles.
+Large outlines retain all nodes and explicitly report `symbolIdsTruncated` and
+`symbolIdsOmitted` when their handle budget is exhausted.
