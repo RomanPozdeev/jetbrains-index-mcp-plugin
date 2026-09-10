@@ -704,7 +704,10 @@ description:
   
   Supports: Java, Kotlin, Python, JavaScript, TypeScript, PHP, Markdown
   
-  Returns: Formatted tree string with element types, modifiers, signatures, and line numbers.
+  Returns: The legacy formatted tree string plus structured nodes with element types,
+  modifiers, signatures, source ranges, children, and optional symbolId handles. All nodes
+  are returned; at most 500 handles are allocated per response. symbolIdsTruncated and
+  symbolIdsOmitted report nodes whose optional handle was omitted by this budget.
   
   Parameters: file (required) - Path relative to project root
   

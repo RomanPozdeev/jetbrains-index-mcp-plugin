@@ -513,9 +513,11 @@ class ResultShapeContractUnitTest : TestCase() {
                     signature = "handle(Request): Response",
                     line = 42,
                     endLine = 55,
-                    children = listOf()
+                    children = listOf(),
+                    symbolId = "sym_structure_method"
                 )
-            )
+            ),
+            symbolId = "sym_structure_class"
         )
         val ssrMatch = StructuralSearchReplaceTool.SsrMatch(
             file = "src/main/java/com/example/Service.java",
@@ -1021,7 +1023,10 @@ class ResultShapeContractUnitTest : TestCase() {
                 FileStructureResult(
                     file = "src/main/java/com/example/Service.java",
                     language = "JAVA",
-                    structure = "Service\n  handle(Request): Response"
+                    structure = "Service\n  handle(Request): Response",
+                    nodes = listOf(structureNode),
+                    symbolIdsTruncated = true,
+                    symbolIdsOmitted = 1
                 )
             ),
             struct(
