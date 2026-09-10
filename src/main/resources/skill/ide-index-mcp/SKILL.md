@@ -191,3 +191,10 @@ See [claude-code-hooks.md](https://github.com/hechtcarmel/jetbrains-index-mcp-pl
 ## Detailed Tool Parameters
 
 For complete parameter reference with types, defaults, and return formats, see [tools-reference.md](references/tools-reference.md).
+
+### Targeted external file synchronization
+
+`ide_sync_files` validates the complete `paths` batch before refreshing. Paths must stay
+inside the selected project/content root, without absolute paths, traversal or symlink escapes.
+A deleted path already known to VFS refreshes its nearest existing parent; an unknown missing
+path returns "Not found". The response separates `requestedPaths`, `refreshedRoots` and `deletedPaths`.

@@ -711,3 +711,10 @@ Quick summary of the non-negotiables:
 ---
 
 **Template Source**: [JetBrains IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template)
+
+### Targeted external file synchronization
+
+`ide_sync_files` validates the complete `paths` batch before refreshing. Paths must stay
+inside the selected project/content root, without absolute paths, traversal or symlink escapes.
+A deleted path already known to VFS refreshes its nearest existing parent; an unknown missing
+path returns "Not found". The response separates `requestedPaths`, `refreshedRoots` and `deletedPaths`.

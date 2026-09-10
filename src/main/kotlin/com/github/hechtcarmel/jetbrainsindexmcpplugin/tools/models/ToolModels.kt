@@ -312,7 +312,10 @@ data class IndexStatusResult(
 data class SyncFilesResult(
     val syncedPaths: List<String>,
     val syncedAll: Boolean,
-    val message: String
+    val message: String,
+    val requestedPaths: List<String> = emptyList(),
+    val refreshedRoots: List<String> = emptyList(),
+    val deletedPaths: List<String> = emptyList()
 )
 
 // ide_build_project output
