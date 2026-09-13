@@ -492,7 +492,9 @@
   type: string
 
 ## SyncFilesResult
+  deletedPaths: array (optional)
   message: string
+  refreshedRoots: array (optional)
   syncedAll: boolean
   syncedPaths: array
 

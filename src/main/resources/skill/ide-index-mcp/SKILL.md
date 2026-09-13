@@ -80,7 +80,7 @@ The built-in `mcp__intellij__*` MCP is **not** a fallback for `mcp__intellij-ind
 
 ## File Sync Rule
 
-If you created or modified files outside the IDE (via Write/Edit tools) and an IDE search tool returns incomplete/missing results, call `ide_sync_files` first, then retry.
+If you created or modified files outside the IDE (via Write/Edit tools) and an IDE search tool returns incomplete/missing results, call `ide_sync_files` first, then retry. It accepts relative paths (project base first, then module content roots) and absolute paths inside those roots. The whole batch is validated before refresh; known deleted targets refresh through their nearest existing parent.
 
 ```json
 { "paths": ["src/new_file.java", "src/modified_file.java"] }

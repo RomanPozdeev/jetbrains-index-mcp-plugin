@@ -2776,7 +2776,7 @@ schema:
 description:
   Force the IDE to synchronize its virtual file system and PSI cache with external file changes. Use when files were created, modified, or deleted outside the IDE (e.g., by coding agents) and other IDE tools report stale results or miss references in recently changed files.
   call it on-demand only when needed.
-  Parameters: paths (optional array of relative file/directory paths to sync; if omitted, syncs entire project), project_path (optional).
+  Parameters: paths (optional array of relative or in-project absolute file/directory paths to sync; if omitted, syncs entire project), project_path (optional).
   Example: {} or {"paths": ["src/main/java/com/example/NewFile.java", "src/main/java/com/example/ModifiedFile.java"]}
 schema:
   {
@@ -2784,7 +2784,7 @@ schema:
     {
       "paths":
       {
-        "description": "File or directory paths relative to project root to sync. If omitted, syncs the entire project.",
+        "description": "Paths relative to the selected project/content root, or absolute paths inside any project/content root. Rejects traversal, symlink escapes and unknown missing paths. Deleted paths known to VFS refresh their nearest existing parent. Relative paths are tried against the project base then module content roots when project_path is omitted or selects the project base; a selected content root confines relative paths to that root. Omit to sync the entire selected root.",
         "items":
         {
           "type": "string"
