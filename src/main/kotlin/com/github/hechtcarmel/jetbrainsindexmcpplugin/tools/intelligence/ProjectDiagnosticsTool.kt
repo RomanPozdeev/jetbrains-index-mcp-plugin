@@ -60,6 +60,7 @@ class ProjectDiagnosticsTool : AbstractMcpTool() {
         internal const val STATE_FAILED = "failed"
         internal const val STATE_SKIPPED = "skipped"
         internal const val STATE_NOT_ANALYZED = "not_analyzed"
+        internal const val STATE_NOT_FOUND = "not_found"
 
         internal const val STATUS_COMPLETED = "completed"
         internal const val STATUS_TIMED_OUT = "timed_out"

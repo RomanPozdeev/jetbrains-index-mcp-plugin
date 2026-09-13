@@ -267,16 +267,16 @@ These tools work in all supported JetBrains IDEs.
 | Tool | Description |
 |------|-------------|
 | `ide_find_references` | Find all references to a symbol across the entire project, optionally restricted to path globs via `paths` |
-| `ide_find_definition` | Find the definition/declaration location of a symbol |
-| `ide_symbol_info` | Resolved signature and documentation for the symbol at a position — parameter and return types expanded to fully qualified names (Java), structured `parameters`, modifiers, containing declaration, and the doc comment as plain text, without reading the file *(disabled by default)* |
+| `ide_find_definition` | Find the definition/declaration location of a symbol; returns a reusable `symbolId` and accepts it alone for exact lookup after edits or rename |
+| `ide_symbol_info` | Resolved signature and documentation for a symbol — accepts position, qualified name, or a reusable `symbolId`; parameter and return types expanded to fully qualified names (Java), structured `parameters`, modifiers, containing declaration, and the doc comment as plain text, without reading the file *(disabled by default)* |
 | `ide_find_class` | Search for classes/interfaces by name with camelCase/substring/wildcard matching |
 | `ide_find_file` | Search for files by name using IDE's file index |
 | `ide_find_symbol` | Search for symbols (classes, methods, fields, functions) by name with IntelliJ Go to Symbol matching *(disabled by default)* |
 | `ide_search_text` | Text search using IntelliJ Find in Files with context filtering (substring and regex matching), optionally restricted to path globs via `paths` |
-| `ide_diagnostics` | Analyze file problems with fresh editor diagnostics for open files or public batch diagnostics for closed files, plus optional build/test results; intentions are best-effort |
+| `ide_diagnostics` | Analyze one `file` or up to 100 supplied `files` under one shared timeout budget, with per-file coverage states and configurable `maxProblems`; accepts relative or in-project absolute paths, plus optional build/test results; intentions are best-effort and single-file only |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata: a `complete` flag plus per-file `analyzed`/`timed_out`/`failed`/`skipped`/`not_analyzed` states, so an empty result can never be mistaken for a clean project. Long analyses return an `analysisId` to poll *(disabled by default)* |
 | `ide_index_status` | Check if the IDE is in dumb mode or smart mode |
-| `ide_sync_files` | Force sync IDE's virtual file system and PSI cache with external file changes |
+| `ide_sync_files` | Force sync IDE's virtual file system and PSI cache for relative or in-project absolute paths, including deleted targets via their nearest existing parent |
 | `ide_reload_project` | Force-reload Maven or Gradle build model after modifying `pom.xml`/`build.gradle` *(disabled by default)* |
 | `ide_link_build_system` | Link an unlinked Maven/Gradle project for dependency resolution *(disabled by default)* |
 | `ide_import_modules` | Import external Maven project directories as modules into the current IntelliJ window *(disabled by default, requires Maven plugin)* |

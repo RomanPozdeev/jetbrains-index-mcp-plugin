@@ -366,15 +366,15 @@ schema:
 description:
   Get code diagnostics from multiple sources: file analysis (errors, warnings, intentions), build output (compiler errors/warnings from last build), and test results (from open test run tabs).
   
-  Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. The analysisMode field reports which provider produced the file problems: "open_daemon" (file open in an editor) or "closed_batch" (public batch analysis); null when no analysis ran.
+  Returns: problems with severity and location, available intentions/quick fixes, build errors, and test results with error messages and stack traces. Single-file calls report legacy top-level analysis metadata. Multi-file calls return one aggregate problems list plus fileAnalyses entries with state, reason, mode, returned problemCount, and problemsTruncated metadata for each file. States are analyzed, timed_out, failed, skipped (not eligible), not_analyzed (not started before the shared deadline), and not_found. Code problems share the configurable maxProblems response cap; top-level problemsTruncated reports omitted problems. An analyzed state does not imply complete output: re-query truncated files individually, narrowing startLine/endLine if needed.
   
-  At least one source must be active: provide 'file' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine all three.
+  At least one source must be active: provide exactly one of 'file' or 'files' for code analysis, 'includeBuildErrors' for build output, or 'includeTestResults' for test results. Can combine file analysis with build and test results. A multi-file call accepts at most 100 supplied paths, all sharing one analysis timeout budget; aliases and duplicate paths are analyzed only once.
   
-  File analysis uses fresh daemon highlights for files that are already open in an editor. Closed files use public batch analysis, so weak warnings and quick-fix intentions may be less complete unless the file is open. The analyzed file is re-read from disk first, so results reflect edits made outside the IDE without calling ide_sync_files. For diagnostics across many files or the whole project with per-file coverage metadata, use ide_project_diagnostics.
+  File analysis uses fresh daemon highlights for files that are already open in an editor. Closed files use public batch analysis, so weak warnings and quick-fix intentions may be less complete unless the file is open. If an open-editor daemon does not run and returns before the deadline, analysis falls back to the batch path; if it consumes the shared timeout, the result is timed_out without starting a second budget. The analyzed file is re-read from disk first, so results reflect edits made outside the IDE without calling ide_sync_files. For diagnostics across many files or the whole project with per-file coverage metadata, use ide_project_diagnostics.
   
-  Parameters: file (optional, enables code analysis), line + column (optional, for intentions, requires file), startLine/endLine (optional, requires file), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
+  Parameters: file or files (mutually exclusive, relative or in-project absolute paths), line + column (optional, for intentions, single file only), startLine/endLine (optional, single file only), includeBuildErrors (optional), includeTestResults (optional), severity (optional, default 'all'), maxProblems (optional, default 100, max 500), testResultFilter (optional, default 'failed'), maxBuildErrors (optional, default 100), maxTestResults (optional, default 100).
   
-  Example: {"file": "src/MyClass.java"} or {"includeBuildErrors": true, "severity": "errors"} or {"file": "src/MyClass.java", "includeBuildErrors": true, "includeTestResults": true}
+  Example: {"file": "src/MyClass.java"} or {"files": ["src/A.java", "src/B.java"]} or {"includeBuildErrors": true, "severity": "errors"}
 schema:
   {
     "properties":
@@ -391,8 +391,19 @@ schema:
       },
       "file":
       {
-        "description": "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). Optional — enables per-file code analysis.",
+        "description": "Project-relative or in-project absolute file path. Optional — enables per-file code analysis.",
         "type": "string"
+      },
+      "files":
+      {
+        "description": "Project-relative or in-project absolute file paths to analyze under one shared timeout budget (max 100 supplied paths). Aliases and duplicates are analyzed once. Mutually exclusive with 'file'.",
+        "items":
+        {
+          "type": "string"
+        },
+        "maxItems": 100,
+        "minItems": 1,
+        "type": "array"
       },
       "includeBuildErrors":
       {
@@ -412,6 +423,11 @@ schema:
       "maxBuildErrors":
       {
         "description": "Max build errors to return. Default: 100, max: 500.",
+        "type": "integer"
+      },
+      "maxProblems":
+      {
+        "description": "Max code problems to return. Default: 100, max: 500.",
         "type": "integer"
       },
       "maxTestResults":
@@ -668,6 +684,7 @@ description:
   Returns: file path, line/column of definition, code preview, and symbol name.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -724,6 +741,11 @@ schema:
       "symbol":
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
+        "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
         "type": "string"
       }
     },
@@ -2683,6 +2705,7 @@ description:
   Prefer this over ide_find_definition + reading the file when you only need the signature or the docs.
   
   Target (mutually exclusive):
+  - symbolId: opaque handle returned by a previous semantic call
   - file + line + column: position-based lookup, so overloads are addressable
   - language + symbol: fully qualified symbol reference (supported languages: Java, Kotlin, JavaScript, TypeScript)
   
@@ -2739,6 +2762,11 @@ schema:
       {
         "description": "Fully qualified symbol reference. Format: 'com.example.ClassName' or 'com.example.ClassName#memberName'. Omit generics parameters.",
         "type": "string"
+      },
+      "symbolId":
+      {
+        "description": "Reusable across edits/rename; expires with session, project, inactivity or eviction. Non-canonical: unequal handles may identify the same symbol.",
+        "type": "string"
       }
     },
     "type": "object"
@@ -2748,7 +2776,7 @@ schema:
 description:
   Force the IDE to synchronize its virtual file system and PSI cache with external file changes. Use when files were created, modified, or deleted outside the IDE (e.g., by coding agents) and other IDE tools report stale results or miss references in recently changed files.
   call it on-demand only when needed.
-  Parameters: paths (optional array of relative file/directory paths to sync; if omitted, syncs entire project), project_path (optional).
+  Parameters: paths (optional array of relative or in-project absolute file/directory paths to sync; if omitted, syncs entire project), project_path (optional).
   Example: {} or {"paths": ["src/main/java/com/example/NewFile.java", "src/main/java/com/example/ModifiedFile.java"]}
 schema:
   {
@@ -2756,7 +2784,7 @@ schema:
     {
       "paths":
       {
-        "description": "File or directory paths relative to project root to sync. If omitted, syncs the entire project.",
+        "description": "Paths relative to the selected project/content root, or absolute paths inside any project/content root. Rejects traversal, symlink escapes and unknown missing paths. Deleted paths known to VFS refresh their nearest existing parent. Relative paths are tried against the project base then module content roots when project_path is omitted or selects the project base; a selected content root confines relative paths to that root. Omit to sync the entire selected root.",
         "items":
         {
           "type": "string"

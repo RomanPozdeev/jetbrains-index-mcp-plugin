@@ -7,7 +7,9 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandEntry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandHistoryService
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandStatus
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.EdtHeartbeatService
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.McpServerEpoch
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.ToolRegistry
 import com.intellij.openapi.application.ApplicationManager
@@ -54,7 +56,9 @@ class McpToolDispatcher @JvmOverloads constructor(
     },
     private val updateHistory: (Project, String, CommandStatus, String?, Long?) -> Unit = { project, id, status, result, duration ->
         CommandHistoryService.getInstance(project).updateCommandStatus(id, status, result, duration)
-    }
+    },
+    private val symbolIdRegistryProvider: () -> SymbolIdRegistry = SymbolIdRegistry::getInstance,
+    private val serverEpochProvider: () -> McpServerEpoch = { McpServerEpoch.shared }
 ) {
 
     private companion object {
@@ -65,7 +69,6 @@ class McpToolDispatcher @JvmOverloads constructor(
          * 100 KB+, and every entry would otherwise sit in the per-project deque.
          */
         const val HISTORY_RESULT_LIMIT = 4096
-
         private fun defaultEdtCheck(): Long? {
             val app = ApplicationManager.getApplication() ?: return null
             if (app.isUnitTestMode) return null
@@ -82,6 +85,18 @@ class McpToolDispatcher @JvmOverloads constructor(
      * propagates.
      */
     suspend fun call(toolName: String, arguments: JsonObject): CallToolResult {
+        val serverEpoch = serverEpochProvider()
+        val requestEpoch = serverEpoch.capture()
+        return withContext(serverEpoch.requestContext(requestEpoch)) {
+            callInEpoch(toolName, arguments)
+        }
+    }
+
+    /** Executes every request phase against the one epoch captured by [call]. */
+    private suspend fun callInEpoch(
+        toolName: String,
+        arguments: JsonObject
+    ): CallToolResult {
         val tool = toolRegistry.getTool(toolName)
             ?: return CallToolResult.error(ErrorMessages.toolNotFound(toolName))
 
@@ -108,16 +123,32 @@ class McpToolDispatcher @JvmOverloads constructor(
         }
         val projectPath = (projectPathElement as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
-        val projectResult = ProjectResolver.resolveOrOpen(projectPath)
-        if (projectResult.isError) return projectResult.errorResult!!
-        val project = projectResult.project!!
+        val rawSymbolId = arguments[ParamNames.SYMBOL_ID]
+        val acceptsSymbolId = tool.inputSchema.properties?.containsKey(ParamNames.SYMBOL_ID) == true
+        val symbolId = if (!acceptsSymbolId || rawSymbolId == null || rawSymbolId is JsonNull) null else {
+            (rawSymbolId as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+                ?.takeIf { it.isNotBlank() }
+                ?: return CallToolResult.error("Parameter 'symbolId' must be a non-blank string.")
+        }
+
+        val project = if (projectPath == null && symbolId != null) {
+            symbolIdRegistryProvider().projectFor(symbolId).getOrElse {
+                return CallToolResult.error(it.message ?: ErrorMessages.symbolIdExpired(symbolId))
+            }
+        } else {
+            val projectResult = ProjectResolver.resolveOrOpen(projectPath)
+            if (projectResult.isError) return projectResult.errorResult!!
+            projectResult.project!!
+        }
 
         val commandEntry = CommandEntry(toolName = toolName, parameters = arguments)
         recordHistorySafely(project, commandEntry)
 
         val startTime = System.currentTimeMillis()
         return try {
-            val result = withIdeModality { tool.execute(project, arguments) }
+            val result = withIdeModality {
+                tool.execute(project, arguments)
+            }
             updateHistorySafely(
                 project = project,
                 commandEntry = commandEntry,

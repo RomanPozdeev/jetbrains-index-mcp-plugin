@@ -12,6 +12,7 @@ import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
 import io.ktor.server.response.header
 import io.ktor.server.response.respondText
+import java.net.InetAddress
 import java.net.URI
 
 /**
@@ -33,10 +34,11 @@ import java.net.URI
  *  - no `Origin` header → allowed, no CORS headers (non-browser client)
  *  - `Origin` present → scheme must be http/https and the host must be loopback; the response
  *    reflects the origin back
- *  - `Host` must be loopback when the server is bound to loopback; the port is ignored. A
+ *  - `Host` must use a standard loopback spelling or the configured bind-host spelling when the
+ *    server is bound to loopback; the port is ignored and request hosts are never resolved. A
  *    deliberately non-loopback bind skips the check — see [installMcpOriginGuard]
  */
-internal val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1")
+internal val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1")
 
 private val PORT_SUFFIX = Regex(":\\d{1,5}")
 
@@ -50,7 +52,13 @@ private val PREFLIGHT_HEADERS = listOf(
     MCP_PROTOCOL_VERSION_HEADER
 ).joinToString(", ")
 
-private fun normalizeHost(host: String) = host.removePrefix("[").removeSuffix("]")
+private fun normalizeHost(host: String) = host.removePrefix("[").removeSuffix("]").removeSuffix(".")
+
+internal fun isLoopbackBindHost(host: String): Boolean {
+    val normalized = normalizeHost(host.trim().lowercase())
+    if (normalized in LOOPBACK_HOSTS) return true
+    return runCatching { InetAddress.getByName(normalized).isLoopbackAddress }.getOrDefault(false)
+}
 
 internal fun isLoopbackOrigin(origin: String): Boolean {
     val uri = try {
@@ -83,9 +91,9 @@ internal fun hostnameOf(hostHeader: String): String? {
 
     val colon = hostHeader.indexOf(':')
     if (colon == 0) return null
-    if (colon < 0) return hostHeader.lowercase()
+    if (colon < 0) return normalizeHost(hostHeader.lowercase())
     if (!hostHeader.substring(colon).matches(PORT_SUFFIX)) return null
-    return hostHeader.substring(0, colon).lowercase()
+    return normalizeHost(hostHeader.substring(0, colon).lowercase())
 }
 
 /**
@@ -108,7 +116,12 @@ internal fun Application.installMcpOriginGuard(
     pathPrefix: String,
     bindHost: String = McpConstants.DEFAULT_SERVER_HOST
 ) {
-    val enforceHostAllowList = normalizeHost(bindHost.trim().lowercase()) in LOOPBACK_HOSTS
+    val enforceHostAllowList = isLoopbackBindHost(bindHost)
+    val allowedLoopbackHosts = if (enforceHostAllowList) {
+        LOOPBACK_HOSTS + normalizeHost(bindHost.trim().lowercase())
+    } else {
+        emptySet()
+    }
 
     intercept(ApplicationCallPipeline.Plugins) {
         if (!context.request.path().startsWith(pathPrefix)) return@intercept
@@ -138,7 +151,7 @@ internal fun Application.installMcpOriginGuard(
         if (!enforceHostAllowList) return@intercept
 
         val hostHeader = context.request.headers[HttpHeaders.Host]
-        if (hostHeader != null && hostnameOf(hostHeader) !in LOOPBACK_HOSTS) {
+        if (hostHeader != null && hostnameOf(hostHeader) !in allowedLoopbackHosts) {
             context.rejectForbidden("Host not allowed")
             return@intercept finish()
         }

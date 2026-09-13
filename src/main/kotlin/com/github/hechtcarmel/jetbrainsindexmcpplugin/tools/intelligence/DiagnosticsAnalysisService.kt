@@ -108,7 +108,39 @@ class DiagnosticsAnalysisService(private val project: Project) {
         severity: String,
         startLine: Int?,
         endLine: Int?,
-        maxProblems: Int
+        maxProblems: Int,
+        timeoutMs: Long? = null
+    ): FileAnalysisResult {
+        val effectiveTimeoutMs = (timeoutMs ?: configuredAnalysisTimeoutMs()).coerceAtLeast(1L)
+        return withTimeoutOrNull(effectiveTimeoutMs) {
+            analyzeFileWithinBudget(
+                virtualFile = virtualFile,
+                filePath = filePath,
+                severity = severity,
+                startLine = startLine,
+                endLine = endLine,
+                maxProblems = maxProblems,
+                timeoutMs = effectiveTimeoutMs
+            )
+        } ?: timeoutResult(effectiveTimeoutMs)
+    }
+
+    /**
+     * The complete analysis budget, including disk refresh, PSI setup, and waiting for the
+     * application-wide main-pass lock. Callers analyzing several files can pass the remaining
+     * part of one shared budget through [analyzeFile]'s `timeoutMs` parameter.
+     */
+    internal fun configuredAnalysisTimeoutMs(): Long =
+        (analysisTimeoutMsOverride ?: DEFAULT_ANALYSIS_TIMEOUT_MS).coerceAtLeast(1L)
+
+    private suspend fun analyzeFileWithinBudget(
+        virtualFile: VirtualFile,
+        filePath: String,
+        severity: String,
+        startLine: Int?,
+        endLine: Int?,
+        maxProblems: Int,
+        timeoutMs: Long
     ): FileAnalysisResult {
         refreshFromDisk(virtualFile)
 
@@ -154,7 +186,6 @@ class DiagnosticsAnalysisService(private val project: Project) {
             )
         }
 
-        val timeoutMs = analysisTimeoutMsOverride ?: DEFAULT_ANALYSIS_TIMEOUT_MS
         val minSeverity = minimumSeverityFor(severity)
 
         return DiagnosticsAnalysisCoordinator.getInstance().withMainPassLock {
@@ -165,19 +196,17 @@ class DiagnosticsAnalysisService(private val project: Project) {
                     minSeverity = minSeverity,
                     startLine = startLine,
                     endLine = endLine,
-                    maxProblems = maxProblems,
-                    timeoutMs = timeoutMs
+                    maxProblems = maxProblems
                 )
                 if (outcome is OpenEditorAnalysisOutcome.Success) {
                     return@withMainPassLock outcome.result
                 }
 
-                val daemonDidNotRun = outcome is OpenEditorAnalysisOutcome.DaemonDidNotRun
-                val fallbackReason = if (daemonDidNotRun) {
+                // A slow daemon consumes the outer complete-operation timeout and cannot reach
+                // this branch. Batch fallback is reserved for a daemon that demonstrably did not
+                // run and returned before the shared budget expired; do not restart that budget.
+                val fallbackReason =
                     "Editor highlighting daemon did not run; returned public batch diagnostics instead, so weak warnings and quick-fix intentions may be incomplete."
-                } else {
-                    "Open-editor highlighting refresh timed out; returned public batch diagnostics instead, so weak warnings and quick-fix intentions may be incomplete."
-                }
 
                 if (fileContext.batchEligible) {
                     val batchFallback = analyzeClosedFile(
@@ -196,17 +225,13 @@ class DiagnosticsAnalysisService(private val project: Project) {
                     return@withMainPassLock timeoutResult(timeoutMs)
                 }
 
-                if (daemonDidNotRun) {
-                    return@withMainPassLock FileAnalysisResult(
-                        problems = emptyList(),
-                        highlights = emptyList(),
-                        analysisFresh = false,
-                        analysisTimedOut = false,
-                        analysisMessage = "Editor highlighting daemon did not run and the file is not eligible for batch analysis, so no diagnostics could be produced."
-                    )
-                }
-
-                return@withMainPassLock timeoutResult(timeoutMs)
+                return@withMainPassLock FileAnalysisResult(
+                    problems = emptyList(),
+                    highlights = emptyList(),
+                    analysisFresh = false,
+                    analysisTimedOut = false,
+                    analysisMessage = "Editor highlighting daemon did not run and the file is not eligible for batch analysis, so no diagnostics could be produced."
+                )
             }
 
             val batchResult = analyzeClosedFile(
@@ -237,28 +262,25 @@ class DiagnosticsAnalysisService(private val project: Project) {
         minSeverity: HighlightSeverity,
         startLine: Int?,
         endLine: Int?,
-        maxProblems: Int,
-        timeoutMs: Long
+        maxProblems: Int
     ): OpenEditorAnalysisOutcome {
-        val waitOutcome = withTimeoutOrNull(timeoutMs) {
-            val overrideRunner = openFileAnalysisOverride
-            if (overrideRunner != null) {
-                HighlightWaitOutcome(
-                    highlights = overrideRunner(
-                        OpenFileAnalysisRequest(
-                            filePath = fileContext.filePath,
-                            psiFile = fileContext.psiFile,
-                            document = fileContext.document,
-                            textEditor = requireNotNull(fileContext.textEditor),
-                            minSeverity = minSeverity
-                        )
-                    ),
-                    provenRan = true
-                )
-            } else {
-                refreshOpenEditorHighlights(fileContext, minSeverity)
-            }
-        } ?: return OpenEditorAnalysisOutcome.TimedOut
+        val overrideRunner = openFileAnalysisOverride
+        val waitOutcome = if (overrideRunner != null) {
+            HighlightWaitOutcome(
+                highlights = overrideRunner(
+                    OpenFileAnalysisRequest(
+                        filePath = fileContext.filePath,
+                        psiFile = fileContext.psiFile,
+                        document = fileContext.document,
+                        textEditor = requireNotNull(fileContext.textEditor),
+                        minSeverity = minSeverity
+                    )
+                ),
+                provenRan = true
+            )
+        } else {
+            refreshOpenEditorHighlights(fileContext, minSeverity)
+        }
 
         // An empty highlight list is ambiguous: it means either "the daemon ran and the file is
         // clean" or "the daemon never ran" (suspended, essential-only mode, headless). Only trust
@@ -657,7 +679,6 @@ class DiagnosticsAnalysisService(private val project: Project) {
 
     private sealed interface OpenEditorAnalysisOutcome {
         data class Success(val result: FileAnalysisResult) : OpenEditorAnalysisOutcome
-        data object TimedOut : OpenEditorAnalysisOutcome
         data object DaemonDidNotRun : OpenEditorAnalysisOutcome
     }
 

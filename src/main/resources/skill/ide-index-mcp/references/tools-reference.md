@@ -13,6 +13,10 @@ Complete parameter reference for all IDE MCP tools. All tools use JSON-RPC via M
 | `language` | string | Language of the symbol (e.g., `"Java"`, `"PHP"`). Required when using `symbol`. |
 | `symbol` | string | Fully qualified symbol reference. Java format: `com.example.ClassName`, `com.example.ClassName#memberName`. PHP format: `\\App\\Service\\UserService`, `\\App\\Service\\UserService::method()`, `\\App\\Service\\UserService::CONSTANT`, `\\App\\Service\\UserService::$property`, `\\App\\Service\\StatusEnum::ACTIVE`. PHP properties require the `$property` form; plain `::name` resolves enum cases (on enum types), constants, or methods. Python format: see **Python symbol grammar** below. |
 
+**Handle identity:** Definition and metadata lookups preserve the exact stored PSI target.
+Declarations without their own source text use a source-context preview. Deleting and recreating
+a file at the same path expires its old handles; rediscover it after `SYMBOL_ID_EXPIRED`.
+
 **Symbol reference:** Some tools accept `language` + `symbol` as an alternative to `file` + `line` + `column`. The two groups are **mutually exclusive**. Supported languages: Java, PHP, JavaScript, TypeScript, Python. Unsupported languages are rejected explicitly; use `file` + `line` + `column` for other languages.
 
 **Python symbol grammar:** Symbols must be module-qualified (dotted path with ≥2 segments):
@@ -84,10 +88,11 @@ Find all usages of a symbol (semantic, not text search).
 ### ide_find_definition
 Go to where a symbol is defined.
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Opaque handle returned by this tool or `ide_symbol_info`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column. Required for position-based lookup. |
@@ -97,7 +102,7 @@ Go to where a symbol is defined.
 | `maxPreviewLines` | integer | no | Max lines for full preview (default 50, max 500) |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ file, line, column, preview, symbolName, astPath }`
+**Returns**: `{ symbolId, file, line, column, preview, symbolName, astPath }`
 Handles: packages, compiled classes, library sources (jar: URLs).
 
 ### ide_symbol_info (disabled by default)
@@ -105,10 +110,11 @@ Resolved signature and documentation of the symbol at a position — the declara
 `ide_find_definition` cannot give, because its preview is source text with unresolved short type
 names and no doc comment.
 
-**Target (mutually exclusive):** `file`+`line`+`column` OR `language`+`symbol`
+**Target (mutually exclusive):** `symbolId` OR `file`+`line`+`column` OR `language`+`symbol`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | conditional | Opaque handle returned by this tool or `ide_find_definition`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | conditional | 1-based line. Required for position-based lookup. |
 | `column` | integer | conditional | 1-based column. Required for position-based lookup. |
@@ -118,7 +124,12 @@ names and no doc comment.
 | `maxDocLength` | integer | no | Truncate documentation beyond this many characters. Default 4000, max 20000 |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ name, kind, qualifiedName, signature, signatureSource, parameters: [{name, type}], returnType, typeParameters, thrownTypes, modifiers, visibility, containingDeclaration, documentation, documentationTruncated, file, line, column, language }`
+**Returns**: `{ symbolId, name, kind, qualifiedName, signature, signatureSource, parameters: [{name, type}], returnType, typeParameters, thrownTypes, modifiers, visibility, containingDeclaration, documentation, documentationTruncated, file, line, column, language }`
+
+For both tools, omitting `project_path` lets `symbolId` route to its owning open project. Handles
+expire on server restart, project close, deletion, one hour of inactivity, or LRU eviction;
+self-navigating synthetic targets also expire after their backing source file changes. Rediscover
+after `SYMBOL_ID_EXPIRED`. Handles are non-canonical and must not be compared for equality.
 
 **Type resolution**: `signatureSource` says how far the types were resolved.
 - `java_psi` — Java declarations. Parameter and return types are fully qualified
@@ -317,25 +328,29 @@ Read file content by path or qualified name, including library/jar sources.
 ## Intelligence Tools
 
 ### ide_diagnostics
-Get code diagnostics from multiple sources: per-file analysis (errors, warnings, quick fixes/intentions), build output from the last build, and test results from open test run tabs. At least one source must be active: provide `file` for code analysis, `includeBuildErrors` for build output, or `includeTestResults` for test results. Can combine all three.
+
+Get code diagnostics from multiple sources: one `file` or a small `files` batch, build output from the last build, and test results from open test run tabs. At least one source must be active: provide exactly one of `file`/`files` for code analysis, `includeBuildErrors` for build output, or `includeTestResults` for test results. Sources can be combined.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | no | Relative file path. Optional — enables per-file code analysis |
-| `line` | integer | no | For intention lookup (default 1, requires `file`) |
-| `column` | integer | no | For intention lookup (default 1, requires `file`) |
-| `startLine` | integer | no | Filter problems to range (requires `file`) |
-| `endLine` | integer | no | Filter problems to range (requires `file`) |
+| `file` | string | no | One project-relative or in-project absolute path. Mutually exclusive with `files` |
+| `files` | string[] | no | Up to 100 supplied relative or in-project absolute paths under one shared timeout budget. Aliases/duplicates are tolerated and analyzed once. Mutually exclusive with `file` |
+| `line` | integer | no | For intention lookup (default 1, single `file` only) |
+| `column` | integer | no | For intention lookup (default 1, single `file` only) |
+| `startLine` | integer | no | Filter problems to range (single `file` only) |
+| `endLine` | integer | no | Filter problems to range (single `file` only) |
 | `includeBuildErrors` | boolean | no | Include errors/warnings from the last build. Default false |
 | `includeTestResults` | boolean | no | Include test results from open test run tabs. Default false |
 | `severity` | enum | no | Filter by severity across all sources: `all` (default), `errors`, `warnings` |
+| `maxProblems` | integer | no | Max code problems returned across the file(s). Default 100, max 500 |
 | `testResultFilter` | enum | no | Filter test results: `failed` (default) or `all` |
 | `maxBuildErrors` | integer | no | Max build errors to return. Default 100, max 500 |
 | `maxTestResults` | integer | no | Max test results to return. Default 100, max 500 |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ problems: [{message, severity, file, line, column, endLine?, endColumn?}], intentions: [{name, description}], problemCount, intentionCount, analysisFresh, analysisTimedOut, analysisMessage, buildErrors?, buildErrorCount?, buildWarningCount?, buildErrorsTruncated?, buildTimestamp?, testResults?, testResultsTruncated?, testSummary? }`
-**Notes**: Open files use fresh daemon highlights. Closed files use public batch analysis, so `WEAK_WARNING` results and quick-fix intentions may be less complete unless the file is already open in an editor. The `analysisMode` field reports which path ran: `open_daemon` or `closed_batch` (null when no analysis ran). The file is refreshed from disk before analysis, so no `ide_sync_files` call is needed after editing it with an external tool.
+**Returns**: `{ problems: [{message, severity, file, line, column, endLine?, endColumn?}], intentions?, problemCount, problemsTruncated?, intentionCount?, analysisFresh?, analysisTimedOut?, analysisMessage?, analysisMode?, fileAnalyses?: [{file, state, reason?, mode?, problemCount, problemsTruncated}], buildErrors?, buildErrorCount?, buildWarningCount?, buildErrorsTruncated?, buildTimestamp?, testResults?, testResultsTruncated?, testSummary? }`
+**Output cap**: At most `maxProblems` code problems across the response. Aggregate/per-file `problemsTruncated` flags known omissions; per-file `problemCount` counts only returned problems. Re-query a truncated path with `file`, narrowing `startLine`/`endLine` if needed.
+**Notes**: File paths preserve literal leading/trailing whitespace. Single-file mode keeps legacy top-level metadata and supports intentions/range filters. Multi-file entries use `analyzed`, `timed_out`, `failed`, `skipped` (not eligible), `not_analyzed` (not started before the shared deadline), or `not_found`; path resolution consumes the shared deadline, and aliases/duplicates are resolved once. Open files use fresh daemon highlights; closed files use public batch analysis. The complete single-file operation is timeout-bounded too, including refresh, PSI setup, and analysis-lock waits. A daemon that reports it did not run can fall back to batch analysis within the remaining budget; a daemon that consumes the timeout does not start a second batch budget.
 **Severity levels**: `ERROR`, `WARNING`, `WEAK_WARNING`
 
 ### ide_project_diagnostics (disabled by default)
@@ -566,14 +581,16 @@ Check if IDE is ready for code intelligence operations.
 When `isDumbMode: true`, most tools will fail. Wait and retry.
 
 ### ide_sync_files
+
 Force sync IDE's virtual file system with external file changes.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `paths` | string[] | no | Relative paths to sync (empty = sync entire project) |
+| `paths` | string[] | no | Paths relative to the selected project/content root, or absolute paths inside any project/content root. Relative paths try the project base then module content roots when `project_path` is omitted or selects the project base; a selected content root confines relative resolution there. Deleted targets refresh their nearest existing parent. Relative traversal and symlink escapes are rejected. Empty/omitted = sync entire selected root |
 | `project_path` | string | no | Project root path |
 
-**Returns**: `{ syncedPaths, syncedAll, message }`
+**Returns**: `{ syncedPaths, syncedAll, message, refreshedRoots, deletedPaths }`
+`syncedPaths` reports normalized targets, `refreshedRoots` reports absolute system-independent roots actually refreshed, and `deletedPaths` identifies targets absent on disk. Discovery ancestors and deletion parents receive shallow refreshes; only explicitly requested existing targets receive recursive refreshes. A shallow ancestor does not replace a recursive target in `refreshedRoots`. Absolute paths match every allowed root even when another content root is selected. The full batch is validated inside project/content roots before refresh begins, all invalid entries are returned together, and an empty safe-root set is an explicit error.
 Call this when files were created/modified outside the IDE and search tools miss them.
 
 ### ide_build_project (disabled by default)

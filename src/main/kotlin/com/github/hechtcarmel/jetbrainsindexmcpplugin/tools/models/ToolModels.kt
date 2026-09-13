@@ -56,6 +56,7 @@ data class FindUsagesResult(
 // find_definition output
 @Serializable
 data class DefinitionResult(
+    val symbolId: String,
     val file: String,
     val line: Int,
     val column: Int,
@@ -94,6 +95,7 @@ data class SymbolParameterInfo(
  */
 @Serializable
 data class SymbolInfoResult(
+    val symbolId: String,
     val name: String,
     val kind: String?,
     val qualifiedName: String?,
@@ -187,15 +189,29 @@ data class ImplementationLocation(
 
 // ide_diagnostics output
 @Serializable
+data class FileDiagnosticsAnalysis(
+    val file: String,
+    val state: String,
+    val reason: String? = null,
+    val mode: String? = null,
+    /** Problems from this file included in the aggregate response, not its total problem count. */
+    val problemCount: Int = 0,
+    /** Collected problems omitted by the response cap; independent of the coverage state. */
+    val problemsTruncated: Boolean = false
+)
+
+@Serializable
 data class DiagnosticsResult(
     val problems: List<ProblemInfo>? = null,
     val intentions: List<IntentionInfo>? = null,
     val problemCount: Int? = null,
+    val problemsTruncated: Boolean? = null,
     val intentionCount: Int? = null,
     val analysisFresh: Boolean? = null,
     val analysisTimedOut: Boolean? = null,
     val analysisMessage: String? = null,
     val analysisMode: String? = null,
+    val fileAnalyses: List<FileDiagnosticsAnalysis>? = null,
     val buildErrors: List<BuildMessage>? = null,
     val buildErrorCount: Int? = null,
     val buildWarningCount: Int? = null,
@@ -312,7 +328,9 @@ data class IndexStatusResult(
 data class SyncFilesResult(
     val syncedPaths: List<String>,
     val syncedAll: Boolean,
-    val message: String
+    val message: String,
+    val refreshedRoots: List<String> = emptyList(),
+    val deletedPaths: List<String> = emptyList()
 )
 
 // ide_build_project output

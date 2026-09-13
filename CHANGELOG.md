@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ide_find_definition` and `ide_symbol_info` return and accept opaque `symbolId` handles backed by exact PSI pointers. Handles survive line shifts and rename, expire on deletion/session reset/project close or cache eviction, and route to their owning open project. Cancellation does not expire a handle; pointer restoration does not hold shared cache locks. Preserve exact targets during definition/metadata lookup, expire handles after file replacement, and use source context for synthetic declarations without their own text.
+
+### Changed
+
+- Bind-host settings now validate syntax before resolver/bind checks and normalize IDN hostnames before persistence, binding, and restart. Malformed labels and host:port input stay invalid even with wildcard DNS, while unchanged legacy hostnames and scoped IPv6 values remain usable.
+- `ide_diagnostics` accepts a small `files` batch of relative or in-project absolute paths with one shared deadline and fail-closed per-file coverage (`analyzed`, `timed_out`, `failed`, `skipped`, `not_analyzed`, or `not_found`) plus truncation metadata. Existing single-file and build/test-only requests remain supported. Isolate per-file analyzer failures, propagate request cancellation, report missing files explicitly, and deduplicate aliases without collapsing distinct symlink/parent paths. `maxProblems` bounds the aggregate response.
+- `ide_sync_files` now validates every explicit target before refreshing anything and returns one whole-batch error listing all invalid paths instead of partial success. It accepts absolute paths inside any allowed project/content root; relative paths fall back across content roots when `project_path` is omitted or selects the project base, while a specifically selected content root remains confined.
+- Targeted synchronization now reports normalized `syncedPaths`, actual absolute `refreshedRoots`, and `deletedPaths`. Known deleted targets refresh through their nearest existing parent, new targets are discovered with shallow ancestor refreshes, and registered symlink-root spellings are preserved without recursively refreshing unrelated directories.
+
+
+### Fixed
+
+- Host-header protection now covers every configured bind host that resolves to loopback and accepts the standard loopback aliases plus that bind host's normalized spelling. Incoming `Host` values are never DNS-resolved.
+- The shared per-file analysis used by `ide_diagnostics` and `ide_project_diagnostics` now bounds the complete operation, including disk refresh, PSI setup, and waiting for the analysis lock. An open-editor daemon that consumes the timeout no longer starts a second batch-analysis budget.
+
+## [5.9.6] - 2026-09-09
+
 ### Fixed
 
 - **Lifecycle management no longer takes your editor tabs away for good** ([#369](https://github.com/hechtcarmel/jetbrains-index-mcp-plugin/issues/369)) — with lifecycle management enabled, a managed project whose window is unfocused goes `dormant` after `Background → Dormant` minutes (default 2) without an MCP tool call, and the dormant transition closed every open editor tab permanently: the user came back to an empty editor and rebuilt their tab set from Recent Files. The countdown itself was never stale — every tool call on a managed project already restarted it, as a new regression test now proves — but a human-plus-agent workflow has plenty of two-minute gaps (the agent thinking or running builds, the user reading a reply), so the result was that tabs vanished "right after" the last call. The dormant transition now remembers the tabs it closes (in tab order, with the selected one) and reopens them the moment the project window regains focus, or when the project is released; an MCP wake still leaves them closed, since the agent needs no editors and reopening them would spend the memory dormant freed. The remembered set is persisted, so it survives an IDE restart and a lifecycle close-and-reopen — cases where the IDE itself saved the workspace with no editors and would otherwise have lost them. Two adjacent gaps are closed as well: on an IDE restart the focus listener could be registered after the restored window had already taken focus, so a managed project sat in `background` — countdown running — while the user worked in it and went dormant two minutes later; the listener now catches up on the current focus state, and recording a reopen no longer demotes a project the focus listener has already promoted to `active`. Switching lifecycle management off in Settings now also stops countdowns that were already armed, instead of letting the last one close the editors anyway.
@@ -1228,7 +1247,8 @@
 - **Runtime**: JVM 21
 - **Transport**: HTTP+SSE with JSON-RPC 2.0
 
-[Unreleased]: https://github.com/hechtcarmel/jetbrains-index-mcp-plugin/compare/v5.9.5...HEAD
+[Unreleased]: https://github.com/hechtcarmel/jetbrains-index-mcp-plugin/compare/v5.9.6...HEAD
+[5.9.6]: https://github.com/hechtcarmel/jetbrains-index-mcp-plugin/compare/v5.9.5...v5.9.6
 [5.9.5]: https://github.com/hechtcarmel/jetbrains-index-mcp-plugin/compare/v5.9.4...v5.9.5
 [5.9.4]: https://github.com/hechtcarmel/jetbrains-index-mcp-plugin/compare/v5.9.3...v5.9.4
 [5.9.3]: https://github.com/hechtcarmel/jetbrains-index-mcp-plugin/compare/v5.9.2...v5.9.3

@@ -19,10 +19,10 @@ These tools work in every supported JetBrains IDE:
 | `ide_find_file` | Search files by name | Enabled |
 | `ide_find_symbol` | Search code symbols by name *(disabled by default)* | Disabled |
 | `ide_search_text` | Text search using IntelliJ Find in Files (substring + regex) | Enabled |
-| `ide_diagnostics` | Analyze file problems with fresh IDE diagnostics, plus optional build/test results | Enabled |
+| `ide_diagnostics` | Analyze one file or a bounded multi-file batch with per-file coverage states, plus optional build/test results | Enabled |
 | `ide_project_diagnostics` | Batch/project-scope diagnostics for many files including unopened ones, with fail-closed coverage metadata; long analyses return an `analysisId` to poll | Disabled |
 | `ide_index_status` | Check indexing status | Enabled |
-| `ide_sync_files` | Force sync VFS/PSI cache | Enabled |
+| `ide_sync_files` | Force sync VFS/PSI cache for relative or in-project absolute paths, including deleted paths through existing parents | Enabled |
 | `ide_reload_project` | Reload linked Maven/Gradle build models | Disabled |
 | `ide_import_modules` | Import external Maven projects as modules | Disabled |
 | `ide_open_workspace` | Scan root directory for Maven projects, or open an explicit module list, in one window | Disabled |
@@ -177,6 +177,20 @@ Most tools operate on a specific location in code and require these parameters:
 | `line` | integer | 1-based line number |
 | `column` | integer | 1-based column number. For dotted expressions like `json.dumps()` or `os.path.join()`, point to the member token (`dumps`, `join`) when targeting the member definition. |
 
+### Opaque Symbol IDs
+
+`ide_find_definition` and `ide_symbol_info` accept and return opaque handles tied to the exact
+PSI target and its original file identity. Lookups preserve that target, including non-named and
+synthetic elements; declarations without their own source text use a source-context preview.
+Pass `symbolId` alone instead of coordinates or `language` + `symbol`; when `project_path` is
+omitted, the handle routes the request to its owning open project. Handles are non-canonical, so
+different IDs may identify the same declaration and must not be compared for symbol equality.
+They expire on server restart, project close, declaration/file deletion, one hour of inactivity,
+or eviction from the 4,096-entry cache. Self-navigating synthetic PSI targets (such as implicit
+enum methods) also expire after their backing source file changes because a hard pointer cannot
+prove that the exact synthetic declaration survived the edit. Rediscover the target after
+`SYMBOL_ID_EXPIRED`.
+
 ### Symbol Reference Parameters
 
 Some tools support identifying the target element by fully qualified symbol reference instead of file position. The following parameters are available as an alternative to `file` + `line` + `column`:
@@ -229,7 +243,7 @@ Parameter lists are not supported (Python has no overload-by-signature); bare un
 
 **Note:** Module-qualified lookup remains v1 grammar and bounded; unsupported cases should fall back to `file` + `line` + `column`.
 
-**Tools that support symbol references:** `ide_find_references`, `ide_find_definition`, `ide_call_hierarchy`, `ide_find_implementations`, `ide_find_super_methods`.
+**Tools that support symbol references:** `ide_find_references`, `ide_find_definition`, `ide_symbol_info`, `ide_call_hierarchy`, `ide_find_implementations`, `ide_find_super_methods`.
 
 ---
 
@@ -347,12 +361,13 @@ Finds the definition/declaration location of a symbol at a given source location
 - Understanding where a method, class, variable, or field is declared
 - Looking up the original definition from a usage site
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Opaque handle returned by this tool or `ide_symbol_info`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -396,6 +411,7 @@ Finds the definition/declaration location of a symbol at a given source location
 
 ```json
 {
+  "symbolId": "sym_4LWQhYb7xR6Fv8nJ3p2t",
   "file": "src/main/java/com/example/UserService.java",
   "line": 15,
   "column": 17,
@@ -431,12 +447,13 @@ types as the IDE resolved them.
 | `quick_navigation` | Any language with a documentation provider — Kotlin, Python, JS/TS, Go, PHP, Rust | As that language's Quick Documentation renders them; often short |
 | `element_text` | No documentation provider answered | The declaration's own source line |
 
-**Target (mutually exclusive):** `file` + `line` + `column` OR `language` + `symbol`
+**Target (mutually exclusive):** `symbolId` OR `file` + `line` + `column` OR `language` + `symbol`
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `symbolId` | string | Conditional | Opaque handle returned by this tool or `ide_find_definition`. Pass it alone to resolve the exact target after edits or rename. |
 | `file` | string | Conditional | Project-relative file path, or a dependency/library absolute path or `jar://` URL previously returned by the plugin. Required for position-based lookup. |
 | `line` | integer | Conditional | 1-based line number. Required for position-based lookup. |
 | `column` | integer | Conditional | 1-based column number. Required for position-based lookup. |
@@ -466,6 +483,7 @@ types as the IDE resolved them.
 
 ```json
 {
+  "symbolId": "sym_4LWQhYb7xR6Fv8nJ3p2t",
   "name": "findUser",
   "kind": "method",
   "qualifiedName": "com.example.UserService#findUser(java.lang.String)",
@@ -709,7 +727,11 @@ Analyzes code diagnostics from three sources:
 - optional build output from the last build,
 - optional test results from open test run tabs.
 
-File problems are collected through explicit daemon analysis, so they do not depend on the target project window being active. Intentions/quick fixes are best-effort and require the file to already be open in an editor.
+File problems are collected through explicit daemon analysis, so they do not depend on the target
+project window being active. Analyze either one `file` or a non-empty `files` list. Multi-file calls
+share one configured analysis timeout budget for the whole request, rather than restarting the
+budget for every file. Intentions/quick fixes are best-effort, require the file to already be open
+in an editor, and are available only in single-file mode.
 
 **Use when:**
 - Finding code issues in a file
@@ -723,14 +745,16 @@ File problems are collected through explicit daemon analysis, so they do not dep
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | No | Path to the file relative to project root. Enables per-file code analysis. At least one of `file`, `includeBuildErrors`, or `includeTestResults` must be provided |
-| `line` | integer | No | 1-based line number for intention lookup (default: 1) |
-| `column` | integer | No | 1-based column number for intention lookup (default: 1) |
-| `startLine` | integer | No | Filter problems to start from this line |
-| `endLine` | integer | No | Filter problems to end at this line |
+| `file` | string | No | One project-relative or in-project absolute file to analyze. Mutually exclusive with `files`. At least one of `file`, `files`, `includeBuildErrors`, or `includeTestResults` must be provided |
+| `files` | string[] | No | Up to 100 supplied project-relative or in-project absolute paths analyzed under one shared timeout budget. Aliases and duplicates are tolerated and analyzed once; whitespace in filenames is preserved. Mutually exclusive with `file` |
+| `line` | integer | No | 1-based line number for intention lookup (default: 1). Single `file` only |
+| `column` | integer | No | 1-based column number for intention lookup (default: 1). Single `file` only |
+| `startLine` | integer | No | Filter problems to start from this line. Single `file` only |
+| `endLine` | integer | No | Filter problems to end at this line. Single `file` only |
 | `includeBuildErrors` | boolean | No | Include errors/warnings from the last build (default: `false`) |
 | `includeTestResults` | boolean | No | Include test results from open test run tabs (default: `false`) |
 | `severity` | string | No | Filter diagnostics by `all`, `errors`, or `warnings` (default: `all`) |
+| `maxProblems` | integer | No | Maximum code problems returned across the file(s) (default: 100, max: 500) |
 | `testResultFilter` | string | No | Filter test results by `failed` or `all` (default: `failed`) |
 | `maxBuildErrors` | integer | No | Maximum build messages to return (default: 100, max: 500) |
 | `maxTestResults` | integer | No | Maximum test results to return (default: 100, max: 500) |
@@ -764,6 +788,24 @@ File problems are collected through explicit daemon analysis, so they do not dep
 }
 ```
 
+**Example Request (multiple files):**
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ide_diagnostics",
+    "arguments": {
+      "files": [
+        "src/main/java/com/example/UserService.java",
+        "src/main/java/com/example/UserController.java"
+      ],
+      "severity": "errors"
+    }
+  }
+}
+```
+
 **Example Response:**
 
 ```json
@@ -781,10 +823,46 @@ File problems are collected through explicit daemon analysis, so they do not dep
   ],
   "intentions": [],
   "problemCount": 1,
+  "problemsTruncated": false,
   "intentionCount": 0,
   "analysisFresh": true,
   "analysisTimedOut": false,
-  "analysisMessage": "Intentions are unavailable because the file is not open in an editor."
+  "analysisMessage": "Intentions are unavailable because the file is not open in an editor.",
+  "analysisMode": "closed_batch"
+}
+```
+
+**Example Response (multiple files):**
+
+```json
+{
+  "problems": [
+    {
+      "message": "Cannot resolve symbol 'UnknownType'",
+      "severity": "ERROR",
+      "file": "src/main/java/com/example/UserService.java",
+      "line": 12,
+      "column": 9
+    }
+  ],
+  "problemCount": 1,
+  "problemsTruncated": false,
+  "fileAnalyses": [
+    {
+      "file": "src/main/java/com/example/UserService.java",
+      "state": "analyzed",
+      "mode": "closed_batch",
+      "problemCount": 1,
+      "problemsTruncated": false
+    },
+    {
+      "file": "src/main/java/com/example/UserController.java",
+      "state": "analyzed",
+      "mode": "closed_batch",
+      "problemCount": 0,
+      "problemsTruncated": false
+    }
+  ]
 }
 ```
 
@@ -793,8 +871,12 @@ File problems are collected through explicit daemon analysis, so they do not dep
 - `analysisTimedOut = true` means the file analysis budget was exceeded; build/test sections may still be returned.
 - `analysisMessage` explains degraded cases such as timeouts or missing live editor context for intentions.
 - `analysisMode` reports which analysis path produced the file problems: `open_daemon` (file open in an editor, fresh daemon highlights) or `closed_batch` (public batch analysis); `null` when no analysis ran.
+- The four legacy top-level analysis fields above apply to single-file calls. Multi-file calls return one aggregate `problems` list and `fileAnalyses: [{file, state, reason?, mode?, problemCount, problemsTruncated}]`. States match project diagnostics: `analyzed`, `timed_out`, `failed`, `skipped` (not eligible, with a reason), or `not_analyzed` (not started before the shared deadline), plus `not_found` for a missing/deleted requested file.
+- Code problems share the requested `maxProblems` response cap. Top-level `problemsTruncated` reports known omissions (absent without code analysis); each file's flag identifies affected paths and its `problemCount` counts returned problems, not all detected problems. An `analyzed` file can have zero returned problems and `problemsTruncated: true`. Re-query such a path using `file`, narrowing `startLine`/`endLine` if needed.
+- The multi-file timeout is shared from before path resolution. A file whose analysis starts but exceeds its remaining budget is `timed_out`; files not started before exhaustion are `not_analyzed`. One analyzer's `ProcessCanceledException` is `failed` when the request coroutine itself is still active.
+- Single-file calls use the same complete-operation timeout: disk refresh, PSI setup, and waiting for the shared analysis lock all consume it. An open-editor daemon that reports it did not run can fall back to batch analysis within the remaining budget; a daemon that consumes the timeout returns `timed_out` without starting a second batch budget.
 - The analyzed file is refreshed from disk and committed to PSI before analysis, so problems describe the file as it is on disk. There is no need to call `ide_sync_files` first after editing a file with an external tool.
-- `line` and `column` affect intention lookup only; file problems are collected for the whole file, then filtered by `startLine` / `endLine` if provided.
+- `line` and `column` affect intention lookup only; file problems are collected for the whole file, then filtered by `startLine` / `endLine` if provided. All four location fields are rejected with `files`.
 
 **Severity Values:**
 - `ERROR` - Compilation error
@@ -958,7 +1040,7 @@ Force the IDE to synchronize its virtual file system and PSI cache with external
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `paths` | array of strings | No | File or directory paths relative to project root to sync. If omitted, syncs the entire project |
+| `paths` | string[] | No | File or directory paths relative to the selected project/content root, or absolute paths inside any project/content root. Relative paths try the project base and then module content roots when `project_path` is omitted or selects the project base; selecting a specific content root confines relative resolution there. A deleted path known to VFS refreshes its nearest existing parent; unknown missing paths, relative `..` traversal, and symlink escapes are rejected. If omitted or empty, syncs the entire selected root |
 
 **Example Request:**
 
@@ -980,9 +1062,21 @@ Force the IDE to synchronize its virtual file system and PSI cache with external
 {
   "syncedPaths": ["src/main/java/com/example/NewFile.java"],
   "syncedAll": false,
-  "message": "Synced 1 path(s)"
+  "message": "Synchronized 1 path(s).",
+  "refreshedRoots": ["/Users/dev/project/src/main/java/com/example/NewFile.java"],
+  "deletedPaths": []
 }
 ```
+
+For a requested path that no longer exists, `syncedPaths` and `deletedPaths` preserve the
+normalized requested path while `refreshedRoots` identifies the nearest existing parent actually
+refreshed shallowly. New paths are discovered one component at a time through shallow ancestor
+refreshes; only explicitly requested existing targets are refreshed recursively. `refreshedRoots`
+uses absolute, system-independent paths and includes discovery ancestors and explicit targets when neither refresh covers the other. The complete batch is validated before the VFS is touched, so all invalid entries are reported together and one escaping or
+unsafe path fails the call without partially refreshing earlier paths. Absolute paths are matched
+against every allowed project/content root even when `project_path` selects another root; relative
+paths stay confined when a specific content root is selected. Neither form can escape the resolved
+project's allowed roots, and the call fails explicitly if none can be resolved safely.
 
 ---
 

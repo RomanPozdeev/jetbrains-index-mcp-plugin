@@ -60,6 +60,19 @@ class McpServerServiceTest : BasePlatformTestCase() {
         assertNull("unit test initialization must not expose a server URL", service!!.getServerUrl())
     }
 
+    fun testStopAdvancesExactlyOneSharedRegistryEpoch() {
+        service = McpServerService(testScope)
+        val before = McpServerEpoch.shared.capture()
+
+        service!!.stopServer()
+
+        assertEquals(
+            "one stop must create one atomic boundary for every handle registry",
+            before + 1,
+            McpServerEpoch.shared.capture()
+        )
+    }
+
     /**
      * A failed bind must surface as an error result — not as a thrown engine-side
      * CancellationException that kills the calling coroutine with no serverError recorded.

@@ -7,6 +7,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.exceptions.IndexNotReadyEx
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobMatcher
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
@@ -32,6 +33,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.LocalFileSystem
 import java.io.File
+import java.io.IOException
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiDocumentManager
@@ -413,12 +415,26 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
             return localFileSystem.refreshAndFindFileByPath(canonicalPath)
         }
 
-        // Absolute paths are validated against project roots before resolving
-        if (relativePath.startsWith("/") || relativePath.startsWith("\\")) {
-            val canonical = File(relativePath).canonicalPath
+        fun canonicalPathOrNull(file: File): String? = try {
+            file.canonicalPath
+        } catch (_: IOException) {
+            null
+        } catch (_: SecurityException) {
+            null
+        }
+
+        fun isWithinRoot(canonicalPath: String, rootPath: String): Boolean =
+            canonicalPath.startsWith(rootPath + File.separator)
+
+        // Absolute paths are validated against project roots before resolving.
+        val requestedFile = File(relativePath)
+        val hasAbsoluteSyntax = requestedFile.isAbsolute ||
+            relativePath.startsWith('/') || relativePath.startsWith('\\')
+        if (hasAbsoluteSyntax) {
+            val canonical = canonicalPathOrNull(requestedFile) ?: return null
             val projectRoots = listOfNotNull(project.basePath) + ProjectUtils.getModuleContentRoots(project)
             val withinProject = projectRoots.any { root ->
-                canonical.startsWith(File(root).canonicalPath + File.separator)
+                canonicalPathOrNull(File(root))?.let { isWithinRoot(canonical, it) } == true
             }
             if (!withinProject) return null
             return findOrRefresh(canonical)
@@ -427,8 +443,9 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         // Try project basePath first
         val basePath = project.basePath
         if (basePath != null) {
-            val canonical = File(basePath, relativePath).canonicalPath
-            if (canonical.startsWith(File(basePath).canonicalPath + File.separator)) {
+            val canonical = canonicalPathOrNull(File(basePath, relativePath))
+            val canonicalBase = canonicalPathOrNull(File(basePath))
+            if (canonical != null && canonicalBase != null && isWithinRoot(canonical, canonicalBase)) {
                 val file = findOrRefresh(canonical)
                 if (file != null) return file
             }
@@ -437,8 +454,9 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         // Try module content roots (workspace sub-project support)
         for (rootPath in ProjectUtils.getModuleContentRoots(project)) {
             if (rootPath != basePath) {
-                val canonical = File(rootPath, relativePath).canonicalPath
-                if (canonical.startsWith(File(rootPath).canonicalPath + File.separator)) {
+                val canonical = canonicalPathOrNull(File(rootPath, relativePath))
+                val canonicalRoot = canonicalPathOrNull(File(rootPath))
+                if (canonical != null && canonicalRoot != null && isWithinRoot(canonical, canonicalRoot)) {
                     val file = findOrRefresh(canonical)
                     if (file != null) return file
                 }
@@ -525,6 +543,7 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         MISSING,
         POSITION,
         SYMBOL,
+        SYMBOL_ID,
         CONFLICT
     }
 
@@ -555,7 +574,11 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
      * A symbol-mode intent requires both `language` and `symbol`; a lone optional field can be a
      * client/schema placeholder and must not conflict with a complete position lookup.
      */
-    protected fun resolveLookupMode(arguments: JsonObject): LookupModeState {
+    protected fun resolveLookupMode(
+        arguments: JsonObject,
+        allowSymbolId: Boolean = false
+    ): LookupModeState {
+        val hasSymbolId = allowSymbolId && optionalStringArg(arguments, ParamNames.SYMBOL_ID) != null
         val hasLanguage = optionalStringArg(arguments, ParamNames.LANGUAGE) != null
         val hasSymbol = optionalStringArg(arguments, ParamNames.SYMBOL) != null
         val hasAnySymbol = hasLanguage || hasSymbol
@@ -567,6 +590,8 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         val hasCompletePosition = hasFile && hasLine && hasColumn
 
         return when {
+            hasSymbolId && (hasAnySymbol || hasAnyPosition) -> LookupModeState.CONFLICT
+            hasSymbolId -> LookupModeState.SYMBOL_ID
             hasCompleteSymbol && hasAnyPosition -> LookupModeState.CONFLICT
             hasCompletePosition -> LookupModeState.POSITION
             hasAnySymbol -> LookupModeState.SYMBOL
@@ -683,16 +708,24 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
     protected fun resolveElementFromArguments(
         project: Project,
         arguments: JsonObject,
-        allowLibraryFilesForPosition: Boolean = false
+        allowLibraryFilesForPosition: Boolean = false,
+        allowSymbolId: Boolean = false
     ): Result<PsiElement> {
+        val symbolId = if (allowSymbolId) optionalStringArg(arguments, ParamNames.SYMBOL_ID) else null
         val language = optionalStringArg(arguments, ParamNames.LANGUAGE)
         val symbol = optionalStringArg(arguments, ParamNames.SYMBOL)
         val file = optionalStringArg(arguments, ParamNames.FILE)
         val line = arguments[ParamNames.LINE]?.jsonPrimitive?.int
         val column = arguments[ParamNames.COLUMN]?.jsonPrimitive?.int
 
-        return when (resolveLookupMode(arguments)) {
-            LookupModeState.CONFLICT -> ErrorMessages.SYMBOL_AND_POSITION_EXCLUSIVE.toArgumentFailure()
+        return when (resolveLookupMode(arguments, allowSymbolId)) {
+            LookupModeState.CONFLICT -> {
+                if (symbolId != null) ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE.toArgumentFailure()
+                else ErrorMessages.SYMBOL_AND_POSITION_EXCLUSIVE.toArgumentFailure()
+            }
+
+            LookupModeState.SYMBOL_ID ->
+                SymbolIdRegistry.getInstance().resolve(project, symbolId!!)
 
             LookupModeState.SYMBOL -> {
                 if (language == null) return ErrorMessages.missingParamForSymbol(ParamNames.LANGUAGE).toArgumentFailure()
@@ -721,9 +754,21 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
                 Result.success(element)
             }
 
-            LookupModeState.MISSING -> ErrorMessages.SYMBOL_OR_POSITION_REQUIRED.toArgumentFailure()
+            LookupModeState.MISSING -> {
+                val message = if (allowSymbolId) {
+                    ErrorMessages.SYMBOL_ID_OR_SYMBOL_OR_POSITION_REQUIRED
+                } else {
+                    ErrorMessages.SYMBOL_OR_POSITION_REQUIRED
+                }
+                message.toArgumentFailure()
+            }
         }
     }
+
+    /** Preserve an already resolved handle's PSI identity, including non-named and light elements. */
+    @RequiresReadLock
+    protected fun bindExactSymbolId(project: Project, element: PsiElement, preferredId: String? = null): String =
+        SymbolIdRegistry.getInstance().bind(project, element, preferredId)
 
     /**
      * Converts 1-based line/column to document offset.
