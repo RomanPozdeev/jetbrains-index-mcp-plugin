@@ -92,6 +92,14 @@ class ConstantsUnitTest : TestCase() {
         assertEquals("multiple_projects_open", ErrorMessages.ERROR_MULTIPLE_PROJECTS)
     }
 
+    fun testExpiredSymbolIdEchoIsBounded() {
+        val oversizedId = "x".repeat(80)
+        val message = ErrorMessages.symbolIdExpired(oversizedId)
+
+        assertTrue(message.contains("x".repeat(64)))
+        assertFalse(message.contains("x".repeat(65)))
+    }
+
     fun testNoSymbolReferenceHandlerWithSupportedLanguages() {
         val message = ErrorMessages.noSymbolReferenceHandler("Python", listOf("Java", "Kotlin", "Java"))
         assertTrue(message.contains("Unsupported language for symbol references: Python"))

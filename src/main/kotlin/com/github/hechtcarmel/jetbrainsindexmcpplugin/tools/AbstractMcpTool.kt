@@ -7,6 +7,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.exceptions.IndexNotReadyEx
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.BuiltInSearchScope
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.PathGlobMatcher
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.PaginationService
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.ProjectResolver
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
@@ -525,6 +526,7 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         MISSING,
         POSITION,
         SYMBOL,
+        SYMBOL_ID,
         CONFLICT
     }
 
@@ -555,7 +557,11 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
      * A symbol-mode intent requires both `language` and `symbol`; a lone optional field can be a
      * client/schema placeholder and must not conflict with a complete position lookup.
      */
-    protected fun resolveLookupMode(arguments: JsonObject): LookupModeState {
+    protected fun resolveLookupMode(
+        arguments: JsonObject,
+        allowSymbolId: Boolean = false
+    ): LookupModeState {
+        val hasSymbolId = allowSymbolId && optionalStringArg(arguments, ParamNames.SYMBOL_ID) != null
         val hasLanguage = optionalStringArg(arguments, ParamNames.LANGUAGE) != null
         val hasSymbol = optionalStringArg(arguments, ParamNames.SYMBOL) != null
         val hasAnySymbol = hasLanguage || hasSymbol
@@ -567,6 +573,8 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
         val hasCompletePosition = hasFile && hasLine && hasColumn
 
         return when {
+            hasSymbolId && (hasAnySymbol || hasAnyPosition) -> LookupModeState.CONFLICT
+            hasSymbolId -> LookupModeState.SYMBOL_ID
             hasCompleteSymbol && hasAnyPosition -> LookupModeState.CONFLICT
             hasCompletePosition -> LookupModeState.POSITION
             hasAnySymbol -> LookupModeState.SYMBOL
@@ -683,16 +691,24 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
     protected fun resolveElementFromArguments(
         project: Project,
         arguments: JsonObject,
-        allowLibraryFilesForPosition: Boolean = false
+        allowLibraryFilesForPosition: Boolean = false,
+        allowSymbolId: Boolean = false
     ): Result<PsiElement> {
+        val symbolId = if (allowSymbolId) optionalStringArg(arguments, ParamNames.SYMBOL_ID) else null
         val language = optionalStringArg(arguments, ParamNames.LANGUAGE)
         val symbol = optionalStringArg(arguments, ParamNames.SYMBOL)
         val file = optionalStringArg(arguments, ParamNames.FILE)
         val line = arguments[ParamNames.LINE]?.jsonPrimitive?.int
         val column = arguments[ParamNames.COLUMN]?.jsonPrimitive?.int
 
-        return when (resolveLookupMode(arguments)) {
-            LookupModeState.CONFLICT -> ErrorMessages.SYMBOL_AND_POSITION_EXCLUSIVE.toArgumentFailure()
+        return when (resolveLookupMode(arguments, allowSymbolId)) {
+            LookupModeState.CONFLICT -> {
+                if (symbolId != null) ErrorMessages.SYMBOL_ID_AND_OTHER_TARGET_EXCLUSIVE.toArgumentFailure()
+                else ErrorMessages.SYMBOL_AND_POSITION_EXCLUSIVE.toArgumentFailure()
+            }
+
+            LookupModeState.SYMBOL_ID ->
+                SymbolIdRegistry.getInstance().resolve(project, symbolId!!)
 
             LookupModeState.SYMBOL -> {
                 if (language == null) return ErrorMessages.missingParamForSymbol(ParamNames.LANGUAGE).toArgumentFailure()
@@ -721,9 +737,21 @@ withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { act
                 Result.success(element)
             }
 
-            LookupModeState.MISSING -> ErrorMessages.SYMBOL_OR_POSITION_REQUIRED.toArgumentFailure()
+            LookupModeState.MISSING -> {
+                val message = if (allowSymbolId) {
+                    ErrorMessages.SYMBOL_ID_OR_SYMBOL_OR_POSITION_REQUIRED
+                } else {
+                    ErrorMessages.SYMBOL_OR_POSITION_REQUIRED
+                }
+                message.toArgumentFailure()
+            }
         }
     }
+
+    /** Preserve an already resolved handle's PSI identity, including non-named and light elements. */
+    @RequiresReadLock
+    protected fun bindExactSymbolId(project: Project, element: PsiElement, preferredId: String? = null): String =
+        SymbolIdRegistry.getInstance().bind(project, element, preferredId)
 
     /**
      * Converts 1-based line/column to document offset.

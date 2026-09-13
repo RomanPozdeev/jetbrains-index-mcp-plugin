@@ -75,6 +75,7 @@
   file: string
   line: number
   preview: string
+  symbolId: string
   symbolName: string
 
 ## DiagnosticsResult
@@ -454,6 +455,7 @@
   returnType: string? (optional)
   signature: string
   signatureSource: string
+  symbolId: string
   thrownTypes: array? (optional)
   typeParameters: array? (optional)
   visibility: string? (optional)
