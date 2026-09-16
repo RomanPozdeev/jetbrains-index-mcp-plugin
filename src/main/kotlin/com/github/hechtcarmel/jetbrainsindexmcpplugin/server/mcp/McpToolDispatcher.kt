@@ -2,6 +2,7 @@ package com.github.hechtcarmel.jetbrainsindexmcpplugin.server.mcp
 
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ErrorMessages
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.exceptions.IndexNotReadyException
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandEntry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.history.CommandHistoryService
@@ -25,6 +26,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.error
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -59,7 +61,8 @@ class McpToolDispatcher @JvmOverloads constructor(
         CommandHistoryService.getInstance(project).updateCommandStatus(id, status, result, duration)
     },
     private val symbolIdRegistryProvider: () -> SymbolIdRegistry = SymbolIdRegistry::getInstance,
-    private val serverEpochProvider: () -> McpServerEpoch = { McpServerEpoch.shared }
+    private val serverEpochProvider: () -> McpServerEpoch = { McpServerEpoch.shared },
+    private val executionTimeoutMs: Long = 55_000L
 ) {
 
     private companion object {
@@ -70,6 +73,11 @@ class McpToolDispatcher @JvmOverloads constructor(
          * 100 KB+, and every entry would otherwise sit in the per-project deque.
          */
         const val HISTORY_RESULT_LIMIT = 4096
+        // These tools own their wait budget and must return an operation id for the next poll.
+        private val LONG_POLL_TOOLS = setOf(
+            ToolNames.BUILD_PROJECT, ToolNames.RUN_TESTS, ToolNames.PROJECT_DIAGNOSTICS,
+            ToolNames.OPEN_PROJECT, ToolNames.OPEN_WORKSPACE
+        )
         private fun defaultEdtCheck(): Long? {
             val app = ApplicationManager.getApplication() ?: return null
             if (app.isUnitTestMode) return null
@@ -155,8 +163,20 @@ class McpToolDispatcher @JvmOverloads constructor(
         val startTime = System.currentTimeMillis()
         return try {
             val result = withIdeModality {
-                tool.execute(project, arguments)
-            }
+                if (toolName in LONG_POLL_TOOLS) {
+                    tool.execute(project, arguments)
+                } else {
+                    withTimeoutOrNull(executionTimeoutMs) {
+                        tool.execute(project, arguments)
+                    }
+                }
+            } ?: return failed(
+                project, commandEntry, startTime,
+                "Tool '$toolName' timed out while waiting for the IDE or running the operation. " +
+                    "Close any modal dialog, wait for ide_index_status to report isDumbMode=false, " +
+                    "and retry with a narrower scope if searching. " +
+                    "For an edit, inspect the target file before retrying: a write already in progress may have completed."
+            )
             updateHistorySafely(
                 project = project,
                 commandEntry = commandEntry,
