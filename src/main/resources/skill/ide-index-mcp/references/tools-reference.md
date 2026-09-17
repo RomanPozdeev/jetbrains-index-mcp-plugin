@@ -337,11 +337,13 @@ Get hierarchical file structure like IDE's Structure panel. Each element include
 | `includeSymbolIds` | boolean | no | Bind exact handles for nodes; implies `includeNodes`. Default: false |
 | `maxSymbolIds` | integer | no | Handle budget when handles are enabled, from 1–100. Default: 100 |
 
-**Returns**: `{ file, language, structure, nodes?, symbolIdsTruncated?, symbolIdsOmitted? }`
+**Returns**: `{ file, language, structure, nodes, symbolIdsTruncated, symbolIdsOmitted }`
 `structure` is retained for compatibility. Set `includeNodes=true` to receive the same hierarchy as
 structured data; set `includeSymbolIds=true` when exact handles are needed (it implies nodes). IDs
 are bound to the exact extracted PSI elements rather than reconstructed from line numbers. Kotlin
 node kinds distinguish `INTERFACE`, `CLASS`, `ENUM`, `ANNOTATION`, and `OBJECT`.
+Without structured output, `nodes` is empty and the handle fields are `false` and `0`; with handles
+enabled, they report the per-response budget outcome.
 Handles are limited to 100 per response by default; `maxSymbolIds` can lower that limit to 1–100.
 `symbolIdsTruncated` flags this per-response budget and `symbolIdsOmitted` counts budget omissions.
 **Languages**: Java, Kotlin, Python, JS/TS, PHP, Markdown.
