@@ -4,6 +4,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.McpConstants
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ToolNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.mcp.McpServerFactory
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.mcp.McpToolDispatcher
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.settings.McpSettings
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.isFailure
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.testutil.text
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.ToolRegistry
@@ -11,11 +12,15 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.modelcontextprotocol.kotlin.sdk.client.mcpStreamableHttp
+import io.modelcontextprotocol.kotlin.sdk.types.McpJson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
+import java.net.BindException
 import java.net.ServerSocket
 
 /**
@@ -37,14 +42,7 @@ class McpProtocolConformanceTest : BasePlatformTestCase() {
         super.setUp()
         val registry = ToolRegistry().apply { registerBuiltInTools() }
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        port = freePort()
-        server = KtorMcpServer(
-            port = port,
-            serverFactory = McpServerFactory(registry, McpToolDispatcher(registry)),
-            legacySseTransports = LegacySseTransports(),
-            coroutineScope = scope
-        )
-        assertEquals(KtorMcpServer.StartResult.Success, server.start())
+        startServerOnAvailablePort(registry)
     }
 
     override fun tearDown() {
@@ -63,6 +61,10 @@ class McpProtocolConformanceTest : BasePlatformTestCase() {
         assertNotSame("serverInfo.version must not be the old hardcoded constant", "4.10.4", serverInfo.version)
 
         assertNotNull("Server must advertise the tools capability", client.serverCapabilities?.tools)
+        assertFalse(
+            "listChanged must stay false until every transport can deliver tool-list notifications",
+            client.serverCapabilities?.tools?.listChanged == true
+        )
     }
 
     fun testInstructionsCarryTheServerDescription() = withMcpClient { client ->
@@ -105,6 +107,47 @@ class McpProtocolConformanceTest : BasePlatformTestCase() {
         }
     }
 
+    fun testInitializeThenListToolsPublishesSemanticHandlesTargetsAndRefactoringPreview() {
+        val settings = McpSettings.getInstance()
+        val originalDisabled = settings.disabledTools
+        settings.disabledTools = originalDisabled - setOf(
+            ToolNames.SYMBOL_INFO,
+            ToolNames.CHANGE_SIGNATURE
+        )
+        try {
+            withMcpClient { client ->
+                val tools = client.listTools().tools.associateBy { it.name }
+                val semanticTools = setOf(
+                    ToolNames.FIND_REFERENCES,
+                    ToolNames.FIND_DEFINITION,
+                    ToolNames.TYPE_HIERARCHY,
+                    ToolNames.CALL_HIERARCHY,
+                    ToolNames.FIND_IMPLEMENTATIONS,
+                    ToolNames.FIND_SUPER_METHODS,
+                    ToolNames.SYMBOL_INFO
+                )
+                for (toolName in semanticTools) {
+                    val properties = schemaProperties(tools.getValue(toolName).inputSchema)
+                    assertTrue("$toolName must publish symbolId in fresh tools/list", "symbolId" in properties)
+                    assertTrue("$toolName must publish the additive nested target", "target" in properties)
+                }
+
+                for (toolName in setOf(
+                    ToolNames.REFACTOR_RENAME,
+                    ToolNames.REFACTOR_SAFE_DELETE,
+                    ToolNames.CHANGE_SIGNATURE
+                )) {
+                    val properties = schemaProperties(tools.getValue(toolName).inputSchema)
+                    assertTrue("$toolName must publish symbolId in fresh tools/list", "symbolId" in properties)
+                    assertTrue("$toolName must publish dryRun in fresh tools/list", "dryRun" in properties)
+                    assertTrue("$toolName must publish the additive nested target", "target" in properties)
+                }
+            }
+        } finally {
+            settings.disabledTools = originalDisabled
+        }
+    }
+
     fun testCallToolRoundTripsThroughTheProtocol() = withMcpClient { client ->
         val result = client.callTool(ToolNames.INDEX_STATUS, emptyMap())
 
@@ -144,6 +187,56 @@ class McpProtocolConformanceTest : BasePlatformTestCase() {
                 http.close()
             }
         }
+
+    private fun schemaProperties(schema: io.modelcontextprotocol.kotlin.sdk.types.ToolSchema) =
+        McpJson.encodeToJsonElement(schema).jsonObject["properties"]!!.jsonObject
+
+    /**
+     * Closing ServerSocket(0) before Ktor binds necessarily leaves a short TOCTOU window. Retry
+     * only genuine bind collisions so a busy ephemeral port cannot make the protocol gate flaky.
+     */
+    private fun startServerOnAvailablePort(registry: ToolRegistry) {
+        var lastBindFailure: Throwable? = null
+        repeat(10) {
+            port = freePort()
+            val candidate = KtorMcpServer(
+                port = port,
+                serverFactory = McpServerFactory(registry, McpToolDispatcher(registry)),
+                legacySseTransports = LegacySseTransports(),
+                coroutineScope = scope
+            )
+            val startResult = try {
+                candidate.start()
+            } catch (failure: Throwable) {
+                candidate.stop()
+                if (!failure.hasBindException()) throw failure
+                lastBindFailure = failure
+                return@repeat
+            }
+            when (startResult) {
+                KtorMcpServer.StartResult.Success -> {
+                    server = candidate
+                    return
+                }
+                is KtorMcpServer.StartResult.PortInUse -> {
+                    lastBindFailure = BindException("Port ${startResult.port} is already in use")
+                }
+                is KtorMcpServer.StartResult.Error -> {
+                    val cause = startResult.cause
+                    if (cause?.hasBindException() != true) {
+                        candidate.stop()
+                        fail("MCP protocol test server failed to start: ${startResult.message}")
+                    }
+                    lastBindFailure = cause
+                }
+            }
+            candidate.stop()
+        }
+        fail("Could not reserve an MCP protocol test port after 10 attempts: ${lastBindFailure?.message}")
+    }
+
+    private fun Throwable.hasBindException(): Boolean =
+        generateSequence(this) { it.cause }.take(16).any { it is BindException }
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 }

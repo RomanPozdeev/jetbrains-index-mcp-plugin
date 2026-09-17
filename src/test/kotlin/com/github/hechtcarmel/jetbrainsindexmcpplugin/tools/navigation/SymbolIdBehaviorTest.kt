@@ -9,6 +9,7 @@ import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FindSymbolRes
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.FindUsagesResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.RefactoringResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.SymbolInfoResult
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.models.TypeHierarchyResult
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.project.SyncFilesTool
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.refactoring.RenameSymbolTool
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
@@ -227,6 +228,39 @@ class SymbolIdBehaviorTest : McpPlatformTestCase() {
         assertTrue(toolText(result).contains("SYMBOL_ID_EXPIRED"))
     }
 
+    fun testTypeHierarchyAcceptsIdAndReturnsResolvableIds() = runBlocking {
+        registerSourceRoot("hierarchy-symbol-src")
+        val baseSource = """
+            package hierarchyid;
+            public class BaseType {}
+        """.trimIndent()
+        writeProjectFile("hierarchy-symbol-src/hierarchyid/BaseType.java", baseSource)
+        writeProjectFile(
+            "hierarchy-symbol-src/hierarchyid/DerivedType.java",
+            """
+            package hierarchyid;
+            public class DerivedType extends BaseType {}
+            """.trimIndent()
+        )
+        val base = definitionAt("hierarchy-symbol-src/hierarchyid/BaseType.java", baseSource, "BaseType")
+
+        val hierarchyResult = TypeHierarchyTool().execute(project, buildJsonObject {
+            put("symbolId", base.symbolId)
+        })
+        assertToolSucceeded("type_hierarchy should accept symbolId", hierarchyResult)
+        val hierarchy = decode<TypeHierarchyResult>(hierarchyResult)
+        assertEquals(base.symbolId, hierarchy.element.symbolId)
+        val derived = hierarchy.subtypes.single { it.name.endsWith("DerivedType") }
+        assertNotNull("Hierarchy nodes backed by PSI must expose IDs", derived.symbolId)
+
+        val derivedDefinition = FindDefinitionTool().execute(project, buildJsonObject {
+            put("symbolId", derived.symbolId!!)
+        })
+        assertToolSucceeded("A hierarchy node ID should be reusable", derivedDefinition)
+        val resolved = decode<DefinitionResult>(derivedDefinition)
+        assertEquals(derived.symbolId, resolved.symbolId)
+        assertEquals("DerivedType", resolved.symbolName)
+    }
 
     fun testMcpServerStopInvalidatesCurrentSessionIds() = runBlocking {
         val source = "class RestartTarget { void target() {} }"

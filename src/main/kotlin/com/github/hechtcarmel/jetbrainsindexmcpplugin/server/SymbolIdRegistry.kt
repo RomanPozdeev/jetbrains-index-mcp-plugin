@@ -40,6 +40,10 @@ class SymbolIdRegistry @JvmOverloads constructor(
     private val serverEpoch: McpServerEpoch = McpServerEpoch.shared
 ) : Disposable {
 
+    /** Number of slots currently available without evicting another tool's handle. */
+    @Synchronized
+    internal fun availableCapacity(): Int = (maxEntries - entries.size).coerceAtLeast(0)
+
     private data class Entry(
         val project: WeakReference<Project>,
         var pointer: SmartPsiElementPointer<PsiElement>,

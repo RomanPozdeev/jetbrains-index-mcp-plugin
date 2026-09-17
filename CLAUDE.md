@@ -273,12 +273,6 @@ TypeScript SDK), and the stateless Streamable HTTP transport cannot send keep-al
 notifications (kotlin-sdk 0.10.0 drops them in JSON response mode). **No tool call may ever
 block past ~45–55s** — a longer operation must long-poll (issue #277).
 
-`McpToolDispatcher` gives ordinary tool execution a 55-second coroutine deadline and reports
-expiry as an actionable tool error. The three long-poll tools retain their own budgets so their
-operation IDs are not lost. Cancellation remains cooperative: use cancellable EDT dispatch and
-`cancellableBlockingAction` for interruptible blocking analysis with a platform progress indicator.
-An already-running write is not rolled back on timeout; callers must inspect it before retrying.
-
 Shared infrastructure (used by `ide_run_tests`, `ide_build_project`, and `ide_project_diagnostics`):
 - `tools/LongPoll.kt` — the per-call wait-budget policy: `waitSeconds` parameter, default 45,
   ceiling 55.
@@ -287,7 +281,7 @@ Shared infrastructure (used by `ide_run_tests`, `ide_build_project`, and `ide_pr
   exactly-once cleanup, and `awaitWithinBudget` (completed result beats a stale timeout verdict,
   which beats waiting).
 
-A new long-running tool plugs in with four pieces:
+A new long-running tool plugs in with three pieces:
 1. An operation class extending `LongPollOperation` — payload plus `deadlineMs` / `onDeadline`
    (kill, or nothing) / `onCleanup` (disconnect, dispose) hooks.
 2. A project-level `@Service` registry extending `LongPollRegistry<YourOp>` (a few lines; see
@@ -296,7 +290,6 @@ A new long-running tool plugs in with four pieces:
    paths call `awaitWithinBudget`, returning either the tool's normal result (then
    `registry.remove(id)`) or an in-progress model (`status: "running"` + the id + an actionable
    poll instruction). Override `needsPsiSync(arguments)` to skip PSI sync on attach calls.
-4. Add the tool to `McpToolDispatcher.LONG_POLL_TOOLS` so the dispatcher does not impose the ordinary 55-second deadline.
 
 ### Code Style
 - Follow Kotlin coding conventions
@@ -447,8 +440,7 @@ plugin:
   untestable.
 
 `-PkotlinPluginTests=true` additionally loads the bundled Kotlin plugin and the sources under
-`src/kotlinPluginTest/kotlin`, including `KotlinReplaceMemberFormattingBehaviorTest`,
-`KotlinRenameBaseBehaviorTest`,
+`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest`,
 `KotlinChangeSignatureBehaviorTest`, and the safe-delete parameter, qualified-target, and
 synthetic-target behavior tests. The plugin's newer metadata is excluded from test compilation;
 the test runtime uses the IDE's matching stdlib.
@@ -559,8 +551,8 @@ Manage which open projects the MCP server keeps active, in the background, dorma
 **Extended Navigation Tools (Language-Aware):**
 
 These activate based on available language plugins (Java, Python, JavaScript/TypeScript, Go, PHP, Rust, Markdown):
-- `ide_type_hierarchy` - Get type hierarchy for a class (Java, Kotlin, Python, JS/TS, Go, PHP, Rust)
-- `ide_call_hierarchy` - Get call hierarchy for a method (Java, Kotlin, Python, JS/TS, Go, PHP, Rust). Supports `language`+`symbol` as alternative to `file`+`line`+`column`.
+- `ide_type_hierarchy` - Get type hierarchy for a class with bounded BFS pages and cursors (Java, Kotlin, Python, JS/TS, Go, PHP, Rust)
+- `ide_call_hierarchy` - Get call hierarchy for a method with bounded BFS pages and cursors (Java, Kotlin, Python, JS/TS, Go, PHP, Rust). Supports `language`+`symbol` as an alternative to `file`+`line`+`column`.
 - `ide_find_implementations` - Find implementations of interface/method (Java, Kotlin, Python, JS/TS, PHP, Rust — not Go). Supports `language`+`symbol` as alternative to `file`+`line`+`column`.
 - `ide_find_super_methods` - Find methods that a given method overrides/implements (Java, Kotlin, Python, JS/TS, PHP — not Go, Rust). Supports `language`+`symbol` as alternative to `file`+`line`+`column`.
 - `ide_file_structure` - Get hierarchical file structure similar to IDE's Structure view with start/end line numbers (Java, Kotlin, Python, JS/TS, Markdown) (disabled by default)
@@ -645,6 +637,15 @@ The plugin supports cursor-based pagination for search tools that return flat re
 **Schema:** All parameters are optional in the schema (no `required` array) because the Anthropic API does not support `anyOf`/`oneOf` at the top level. Validation is done at runtime — if `cursor` is absent, the tool checks for its required search params and returns an error if missing.
 
 **Backward compatibility:** Old `limit`/`maxResults` parameters work as aliases for `pageSize`. Legacy cursors (without embedded pageSize) are still decodable but require an explicit `pageSize` parameter.
+
+### Bounded hierarchy pages with legacy tree compatibility
+
+Without `maxNodes` or `cursor`, call/type hierarchies keep nested trees and legacy limits.
+Explicit pagination returns bounded breadth-first pages with traversal-local `nodeId`,
+`parentId`, and `depth`. Continuations are scoped to the project, tool, and server session.
+A continuation budget limit preserves the computed page and reports `truncationReason`;
+narrow the query when `hasMore=true` has no cursor. Cancellation and indexing transitions
+propagate through reflective handlers instead of completing an empty hierarchy.
 
 ### Symbol handles across navigation and member editing
 

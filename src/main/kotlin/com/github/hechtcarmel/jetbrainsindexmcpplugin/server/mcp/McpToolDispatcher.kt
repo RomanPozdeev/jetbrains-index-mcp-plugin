@@ -106,6 +106,8 @@ class McpToolDispatcher @JvmOverloads constructor(
         toolName: String,
         arguments: JsonObject
     ): CallToolResult {
+        val serverEpoch = serverEpochProvider()
+        val requestEpoch = serverEpoch.expectedForCurrentRequest()
         val tool = toolRegistry.getTool(toolName)
             ?: return CallToolResult.error(ErrorMessages.toolNotFound(toolName))
 
@@ -123,6 +125,12 @@ class McpToolDispatcher @JvmOverloads constructor(
             )
         }
 
+        // A pre-execution callback can cross a server restart boundary. Reject this request
+        // before resolving a project or allowing any registry-backed work to continue.
+        if (!serverEpoch.isCurrent(requestEpoch)) {
+            return CallToolResult.error("The MCP server session changed. Retry the request.")
+        }
+
         val projectPathElement = arguments[ParamNames.PROJECT_PATH]
         if (projectPathElement != null &&
             projectPathElement !is JsonNull &&
@@ -135,7 +143,15 @@ class McpToolDispatcher @JvmOverloads constructor(
         val schemaProperties = tool.inputSchema.properties
         val acceptsSymbolId = schemaProperties?.containsKey(ParamNames.SYMBOL_ID) == true
         val acceptsUnifiedTarget = UnifiedTargetArguments.isSupportedBy(tool.inputSchema)
-        val symbolId = if (!acceptsSymbolId && !acceptsUnifiedTarget) {
+        // Cursor continuation owns target resolution. Do not route a paged request through
+        // unrelated symbol selectors that a client may have left in the argument object.
+        val ownsCursorContinuation = arguments.containsKey(ParamNames.CURSOR) &&
+            schemaProperties?.containsKey(ParamNames.CURSOR) == true
+        val executionArguments = if (ownsCursorContinuation) {
+            JsonObject(arguments - ParamNames.SYMBOL_ID - UnifiedTargetArguments.TARGET)
+        } else arguments
+
+        val symbolId = if (ownsCursorContinuation || (!acceptsSymbolId && !acceptsUnifiedTarget)) {
             null
         } else {
             UnifiedTargetArguments.symbolIdForRouting(
@@ -164,10 +180,10 @@ class McpToolDispatcher @JvmOverloads constructor(
         return try {
             val result = withIdeModality {
                 if (toolName in LONG_POLL_TOOLS) {
-                    tool.execute(project, arguments)
+                    tool.execute(project, executionArguments)
                 } else {
                     withTimeoutOrNull(executionTimeoutMs) {
-                        tool.execute(project, arguments)
+                        tool.execute(project, executionArguments)
                     }
                 }
             } ?: return failed(

@@ -81,13 +81,8 @@ class TypeHierarchyToolBehaviorTest : McpPlatformTestCase() {
             parentEntries.size
         )
 
-        // The surviving entry must be the informative one — carrying Parent's own transitive
-        // supertype chain, not the interfaces-loop duplicate whose nested supertypes are null.
-        val nested = parentEntries.single().supertypes?.map { it.name }.orEmpty()
-        assertTrue(
-            "The single Parent entry must carry its own supertype hier.GrandParent; got $nested",
-            nested.contains("hier.GrandParent")
-        )
+        assertEquals("The legacy response retains Parent's nested supertype chain",
+            listOf("hier.GrandParent"), parentEntries.single().supertypes.orEmpty().map { it.name })
     }
 
     fun testDiamondHierarchyKeepsDirectlyImplementedInterface() = runBlocking {

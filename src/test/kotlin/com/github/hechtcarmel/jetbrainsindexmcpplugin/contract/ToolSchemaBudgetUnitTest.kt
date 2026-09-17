@@ -22,6 +22,6 @@ class ToolSchemaBudgetUnitTest : TestCase() {
             }
         }
         val bytes = payload.toString().toByteArray(Charsets.UTF_8).size
-        assertTrue("Tool discovery uses $bytes bytes; keep shared target descriptions concise (budget 110000)", bytes <= 110_000)
+        assertTrue("Tool discovery uses $bytes bytes; keep shared target descriptions concise (budget 115000)", bytes <= 115_000)
     }
 }

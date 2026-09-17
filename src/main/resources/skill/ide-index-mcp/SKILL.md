@@ -195,3 +195,12 @@ See [claude-code-hooks.md](https://github.com/hechtcarmel/jetbrains-index-mcp-pl
 ## Detailed Tool Parameters
 
 For complete parameter reference with types, defaults, and return formats, see [tools-reference.md](references/tools-reference.md).
+
+### Bounded hierarchy pages with legacy tree compatibility
+
+Without `maxNodes` or `cursor`, call/type hierarchies keep nested trees and legacy limits.
+Explicit pagination returns bounded breadth-first pages with traversal-local `nodeId`,
+`parentId`, and `depth`. Continuations are scoped to the project, tool, and server session.
+A continuation budget limit preserves the computed page and reports `truncationReason`;
+narrow the query when `hasMore=true` has no cursor. Cancellation and indexing transitions
+propagate through reflective handlers instead of completing an empty hierarchy.
