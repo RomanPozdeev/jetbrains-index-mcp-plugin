@@ -1095,7 +1095,6 @@ class PythonStructureHandler : BasePythonHandler<List<StructureNode>>(), Structu
             }
 
         } catch (e: Exception) {
-
             e.rethrowIfControlFlow()
             LOG.warn("Failed to extract Python class structure: ${e.message}")
         }

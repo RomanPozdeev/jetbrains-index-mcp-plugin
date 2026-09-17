@@ -56,6 +56,9 @@ object ParamNames {
     const val REGEX = "regex"
     const val CURSOR = "cursor"
     const val INCLUDE_GENERATED = "includeGenerated"
+    const val INCLUDE_NODES = "includeNodes"
+    const val INCLUDE_SYMBOL_IDS = "includeSymbolIds"
+    const val MAX_SYMBOL_IDS = "maxSymbolIds"
 
     // SSR parameters
     const val SEARCH_PATTERN = "searchPattern"

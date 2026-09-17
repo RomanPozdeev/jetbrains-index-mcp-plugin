@@ -555,7 +555,7 @@ These activate based on available language plugins (Java, Python, JavaScript/Typ
 - `ide_call_hierarchy` - Get call hierarchy for a method with bounded BFS pages and cursors (Java, Kotlin, Python, JS/TS, Go, PHP, Rust). Supports `language`+`symbol` as an alternative to `file`+`line`+`column`.
 - `ide_find_implementations` - Find implementations of interface/method (Java, Kotlin, Python, JS/TS, PHP, Rust — not Go). Supports `language`+`symbol` as alternative to `file`+`line`+`column`.
 - `ide_find_super_methods` - Find methods that a given method overrides/implements (Java, Kotlin, Python, JS/TS, PHP — not Go, Rust). Supports `language`+`symbol` as alternative to `file`+`line`+`column`.
-- `ide_file_structure` - Get hierarchical file structure similar to IDE's Structure view with start/end line numbers (Java, Kotlin, Python, JS/TS, Markdown) (disabled by default)
+- `ide_file_structure` - Get legacy file structure text; opt into structured nodes and exact handles with `includeNodes`/`includeSymbolIds` (disabled by default)
 
 **Java/Kotlin-Only Tools:**
 - `ide_list_tests` - List all test methods/classes discovered by the IDE's test framework extension points (JUnit, TestNG, etc.). Optional `file` parameter limits scan to a single file. Returns entries with className, methodName, framework, file path, and line number. Requires Java plugin — the `com.intellij.testFramework` extension point is declared by the Java plugin. (disabled by default)
@@ -657,6 +657,12 @@ deleted declarations and handles from another project or server session are reje
 member edits return current declaration metadata. Kotlin abstract/sealed declarations retain
 `ABSTRACT_CLASS`, while anonymous implementations report a useful source location without an
 invented qualified name.
+
+`ide_file_structure` keeps the legacy `structure` response by default and avoids returning a
+structured-node payload or allocating handles. Use `includeNodes=true`
+for structured declarations, and `includeSymbolIds=true` when exact handles are needed (it implies
+`includeNodes`). Handle allocation is opt-in and capped at 100 per response; lower it with
+`maxSymbolIds` (1–100). Large responses report `symbolIdsTruncated` and `symbolIdsOmitted`.
 
 ### Structured Lookup Targets
 
@@ -777,64 +783,3 @@ Quick summary of the non-negotiables:
 ---
 
 **Template Source**: [JetBrains IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template)
-### Symbol handles for definition and symbol info
-
-`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
-coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
-When `project_path` is omitted, the handle identifies its owning open project. Handles expire
-on server restart, project close, deletion, one hour of inactivity, or eviction from the
-4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
-different IDs can identify the same declaration, so do not compare IDs for symbol equality.
-
-### Structured lookup targets
-
-`ide_find_definition` and `ide_symbol_info` also accept a nested `target` with exactly one
-variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "line": 3,
-"column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
-Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
-Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
-
-### Rename preview
-
-`ide_refactor_rename` accepts `dryRun: true` with legacy selectors, `symbolId`, or a nested
-`target`. It returns `canApply`, `target`, `plannedChange`, `affectedFiles`, `usageCount`,
-`conflictCount`, `warnings` and `elapsedMs` without writing source or saving documents.
-Preview and apply share conflict discovery and automatic rename selections. A successful
-apply returns current `updatedSymbol` metadata. The preview response assembly is shared
-with subsequent refactoring preview implementations.
-
-`-PkotlinPluginTests=true` loads the bundled Kotlin plugin and the sources under
-`src/kotlinPluginTest/kotlin`, including `KotlinRenameBaseBehaviorTest`,
-`KotlinChangeSignatureBehaviorTest`, and `KotlinSymbolInfoBehaviorTest`. The plugin's newer
-metadata is excluded from test compilation, and the test runtime uses the IDE's matching stdlib.
-
-### Safe-delete preview
-
-`ide_refactor_safe_delete` accepts `dryRun: true` and uses the same preview response as rename.
-It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply share forced-delete
-eligibility, including files with no declarations and incomplete usage discovery; warnings describe
-these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
-ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.
-
-### Change-signature preview
-
-`ide_change_signature` accepts `symbolId`, a nested `target`, or the existing file position.
-`dryRun=true` uses public platform usage and conflict discovery without running the processor.
-The shared preview reports affected files, conflicts, read-only scope, and cases requiring
-an interactive overrider/default-value decision. Apply returns updated symbol metadata.
-
-### Symbol handles in search and member editing
-
-Class, symbol, reference, implementation, and super-method queries expose exact declaration handles.
-Reference and implementation queries and member edits accept the shared target selectors.
-Cached searches keep `stale=true` after PSI edits and rebind exact smart pointers on returned pages;
-deleted targets and another project/session are rejected. Member edits return updated metadata.
-Kotlin abstract/sealed declarations retain `ABSTRACT_CLASS`; anonymous implementations have
-a useful source location without an invented qualified name.
-
-### Structured file outlines
-
-`ide_file_structure` keeps the formatted `structure` string and adds `nodes` with nested
-declarations, source ranges, signatures, modifiers, and optional exact `symbolId` handles.
-Large outlines retain all nodes and explicitly report `symbolIdsTruncated` and
-`symbolIdsOmitted` when their handle budget is exhausted.

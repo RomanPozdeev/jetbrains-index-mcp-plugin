@@ -8,6 +8,7 @@
 
 - Add opt-in bounded hierarchy pagination with parent/depth identity and session-scoped cursors while preserving legacy trees and limits.
 - Add structured file-outline nodes alongside formatted text, with exact declaration handles and explicit handle-budget metadata.
+- Document the empty-file response change: `ide_file_structure` now returns the JSON envelope with the legacy message in `structure` and an empty `nodes` array.
 
 ## [5.15.0] - 2026-09-15
 

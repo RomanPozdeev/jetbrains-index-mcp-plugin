@@ -43,6 +43,7 @@ class FileStructureNodesBehaviorTest : McpPlatformTestCase() {
 
         val result = FileStructureTool().execute(project, buildJsonObject {
             put("file", "structure-src/OverloadedStructure.java")
+            put("includeSymbolIds", true)
         })
         assertToolSucceeded("file_structure should return Java structure", result)
 
@@ -87,6 +88,8 @@ class FileStructureNodesBehaviorTest : McpPlatformTestCase() {
 
         val result = FileStructureTool().execute(project, buildJsonObject {
             put("file", "structure-src/LargeStructure.java")
+            put("includeNodes", true)
+            put("includeSymbolIds", true)
         })
         assertToolSucceeded("large outlines should retain the complete structure", result)
         val payload = json.decodeFromString<FileStructureResult>(toolText(result))
@@ -97,7 +100,7 @@ class FileStructureNodesBehaviorTest : McpPlatformTestCase() {
         val allNodes = listOf(root) + root.children
         val registry = SymbolIdRegistry.getInstance()
         val handles = allNodes.mapNotNull { it.symbolId }
-        assertEquals(registry.responseHandleBudget, handles.size)
+        assertEquals(100, handles.size)
         assertTrue(payload.symbolIdsTruncated)
         assertEquals(allNodes.size - handles.size, payload.symbolIdsOmitted)
         assertNotNull("preorder gives the root a usable handle", root.symbolId)
@@ -106,5 +109,58 @@ class FileStructureNodesBehaviorTest : McpPlatformTestCase() {
                 assertTrue("every returned handle must still resolve", registry.resolve(project, handle).isSuccess)
             }
         }
+    }
+
+    fun testLegacyResponseOmitsStructuredNodesAndDoesNotAllocateHandles() = runBlocking {
+        writeProjectFile("structure-src/Legacy.java", "class Legacy { int value; }")
+        val registry = SymbolIdRegistry.getInstance()
+        val result = FileStructureTool().execute(project, buildJsonObject {
+            put("file", "structure-src/Legacy.java")
+        })
+        assertToolSucceeded("legacy file structure", result)
+        val payload = json.decodeFromString<FileStructureResult>(toolText(result))
+        assertTrue(payload.structure.contains("Legacy"))
+        assertTrue(payload.nodes.isEmpty())
+        assertEquals(0, registry.sizeForTest())
+    }
+
+    fun testStructuredNodesWithoutHandlesDoNotTouchRegistry() = runBlocking {
+        writeProjectFile("structure-src/NodesOnly.java", "class NodesOnly { int value; }")
+        val registry = SymbolIdRegistry.getInstance()
+        val result = FileStructureTool().execute(project, buildJsonObject {
+            put("file", "structure-src/NodesOnly.java")
+            put("includeNodes", true)
+        })
+        assertToolSucceeded("nodes-only file structure", result)
+        val payload = json.decodeFromString<FileStructureResult>(toolText(result))
+        assertTrue(payload.nodes.isNotEmpty())
+        assertTrue(payload.nodes.flatMap { listOf(it) + it.children }.all { it.symbolId == null })
+        assertEquals(0, registry.sizeForTest())
+    }
+
+    fun testHandleBudgetIsConfigurableAndReportsOmissions() = runBlocking {
+        writeProjectFile("structure-src/Budget.java", "class Budget { int first; int second; }")
+        val result = FileStructureTool().execute(project, buildJsonObject {
+            put("file", "structure-src/Budget.java")
+            put("includeSymbolIds", true)
+            put("maxSymbolIds", 1)
+        })
+        assertToolSucceeded("bounded file structure", result)
+        val payload = json.decodeFromString<FileStructureResult>(toolText(result))
+        val nodes = listOf(payload.nodes.single()) + payload.nodes.single().children
+        assertEquals(1, nodes.count { it.symbolId != null })
+        assertTrue(payload.symbolIdsTruncated)
+        assertEquals(nodes.size - 1, payload.symbolIdsOmitted)
+    }
+
+    fun testInvalidHandleBudgetIsRejected() = runBlocking {
+        writeProjectFile("structure-src/InvalidBudget.java", "class InvalidBudget")
+        val result = FileStructureTool().execute(project, buildJsonObject {
+            put("file", "structure-src/InvalidBudget.java")
+            put("includeSymbolIds", true)
+            put("maxSymbolIds", 101)
+        })
+        assertToolFailed("invalid handle budget", result)
+        assertTrue(toolText(result).contains("maxSymbolIds must be between 1 and 100"))
     }
 }

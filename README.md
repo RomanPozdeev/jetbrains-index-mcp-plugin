@@ -314,7 +314,7 @@ These tools activate based on available language plugins:
 | `ide_call_hierarchy` | Analyze callers or callees in bounded, cursor-paginated breadth-first order, accepting and returning `symbolId` | Java, Kotlin, Python, JS/TS, Go, PHP, Rust |
 | `ide_find_implementations` | Find all implementations of an interface or abstract method | Java, Kotlin, Python, JS/TS, PHP, Rust |
 | `ide_find_super_methods` | Find the full inheritance hierarchy of methods that a method overrides/implements | Java, Kotlin, Python, JS/TS, PHP |
-| `ide_file_structure` | Get hierarchical file structure (similar to IDE's Structure view) with start and end line numbers for each element *(disabled by default)* | Java, Kotlin, Python, JS/TS, PHP, Markdown |
+| `ide_file_structure` | Get legacy file structure text; opt into structured nodes and exact handles with `includeNodes`/`includeSymbolIds` *(disabled by default)* | Java, Kotlin, Python, JS/TS, PHP, Markdown |
 
 PHP file structure support requires the PHP plugin and is available in PhpStorm or IntelliJ IDEA Ultimate with the PHP plugin enabled.
 
@@ -346,6 +346,12 @@ handles for exact declarations. Reference and implementation searches plus `ide_
 Cached search pages remain marked `stale: true` after PSI edits and materialize handles only for
 the returned page from exact smart pointers. Deleted declarations and handles from another project
 or server session are rejected; successful member edits return current declaration metadata.
+
+`ide_file_structure` keeps the legacy `structure` response by default and avoids returning a
+structured-node payload or allocating handles. Use `includeNodes=true`
+for structured declarations, and `includeSymbolIds=true` when exact handles are needed (it implies
+`includeNodes`). Handle allocation is opt-in and capped at 100 per response; lower it with
+`maxSymbolIds` (1–100). Large responses report `symbolIdsTruncated` and `symbolIdsOmitted`.
 
 ### Project Lifecycle Management Tools
 
@@ -610,59 +616,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 Plugin based on the [IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template).
-### Symbol handles for definition and symbol info
-
-`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
-coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
-When `project_path` is omitted, the handle identifies its owning open project. Handles expire
-on server restart, project close, deletion, one hour of inactivity, or eviction from the
-4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
-different IDs can identify the same declaration, so do not compare IDs for symbol equality.
-
-### Structured lookup targets
-
-`ide_find_definition` and `ide_symbol_info` also accept a nested `target` with exactly one
-variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "line": 3,
-"column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
-Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
-Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
-
-### Rename preview
-
-`ide_refactor_rename` accepts `dryRun: true` with legacy selectors, `symbolId`, or a nested
-`target`. It returns `canApply`, `target`, `plannedChange`, `affectedFiles`, `usageCount`,
-`conflictCount`, `warnings` and `elapsedMs` without writing source or saving documents.
-Preview and apply share conflict discovery and automatic rename selections. A successful
-apply returns current `updatedSymbol` metadata. The preview response assembly is shared
-with subsequent refactoring preview implementations.
-
-### Safe-delete preview
-
-`ide_refactor_safe_delete` accepts `dryRun: true` and uses the same preview response as rename.
-It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply share forced-delete
-eligibility, including files with no declarations and incomplete usage discovery; warnings describe
-these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
-ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.
-
-### Change-signature preview
-
-`ide_change_signature` accepts `symbolId`, a nested `target`, or the existing file position.
-`dryRun=true` uses public platform usage and conflict discovery without running the processor.
-The shared preview reports affected files, conflicts, read-only scope, and cases requiring
-an interactive overrider/default-value decision. Apply returns updated symbol metadata.
-
-### Symbol handles in search and member editing
-
-Class, symbol, reference, implementation, and super-method queries expose exact declaration handles.
-Reference and implementation queries and member edits accept the shared target selectors.
-Cached searches keep `stale=true` after PSI edits and rebind exact smart pointers on returned pages;
-deleted targets and another project/session are rejected. Member edits return updated metadata.
-Kotlin abstract/sealed declarations retain `ABSTRACT_CLASS`; anonymous implementations have
-a useful source location without an invented qualified name.
-
-### Structured file outlines
-
-`ide_file_structure` keeps the formatted `structure` string and adds `nodes` with nested
-declarations, source ranges, signatures, modifiers, and optional exact `symbolId` handles.
-Large outlines retain all nodes and explicitly report `symbolIdsTruncated` and
-`symbolIdsOmitted` when their handle budget is exhausted.

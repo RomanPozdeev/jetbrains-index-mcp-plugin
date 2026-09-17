@@ -56,7 +56,9 @@ enum class StructureKind {
  * @property file The file path relative to project root
  * @property language The language ID (e.g., "JAVA", "Python", "kotlin")
  * @property structure The formatted tree string
- * @property nodes The same hierarchy as structured data, including optional symbol handles
+ * @property nodes The same hierarchy as structured data when includeNodes/includeSymbolIds is requested
+ * @property symbolIdsTruncated Whether the per-response handle budget omitted eligible nodes
+ * @property symbolIdsOmitted Number of eligible nodes without a handle because of that budget
  */
 @Serializable
 data class FileStructureResult(

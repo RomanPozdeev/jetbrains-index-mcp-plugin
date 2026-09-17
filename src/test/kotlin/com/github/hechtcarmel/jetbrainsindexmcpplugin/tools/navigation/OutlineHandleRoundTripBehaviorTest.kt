@@ -44,7 +44,11 @@ class OutlineHandleRoundTripBehaviorTest : McpPlatformTestCase() {
             record Point(int x, int y) {}
             class Envelope { class Nested {} }
         """.trimIndent())
-        assertOutlineRoundTrips(file)
+        val payload = assertOutlineRoundTrips(file)
+        assertEquals(
+            listOf("ANNOTATION", "ENUM", "RECORD", "CLASS"),
+            payload.nodes.map { it.kind.name }
+        )
     }
 
     fun testMarkdownHeadingHandlesRoundTrip() = runBlocking {
@@ -73,8 +77,12 @@ class OutlineHandleRoundTripBehaviorTest : McpPlatformTestCase() {
         assertOutlineRoundTrips(file)
     }
 
-    private suspend fun assertOutlineRoundTrips(file: String) {
-        val result = FileStructureTool().execute(project, buildJsonObject { put("file", file) })
+    private suspend fun assertOutlineRoundTrips(file: String): FileStructureResult {
+        val result = FileStructureTool().execute(project, buildJsonObject {
+            put("file", file)
+            put("includeNodes", true)
+            put("includeSymbolIds", true)
+        })
         assertToolSucceeded("extract $file", result)
         val payload = json.decodeFromString<FileStructureResult>(toolText(result))
         val nodes = flatten(payload.nodes)
@@ -96,6 +104,7 @@ class OutlineHandleRoundTripBehaviorTest : McpPlatformTestCase() {
                 assertSame("lookup must not rebind an outline handle to another element: ${node.name}", before, after)
             }
         }
+        return payload
     }
 
     private fun flatten(nodes: List<StructureNode>): List<StructureNode> =

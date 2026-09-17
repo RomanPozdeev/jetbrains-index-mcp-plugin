@@ -1,5 +1,6 @@
 package com.github.hechtcarmel.jetbrainsindexmcpplugin.tools.navigation
 
+import com.github.hechtcarmel.jetbrainsindexmcpplugin.constants.ParamNames
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.handlers.LanguageHandlerRegistry
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.server.SymbolIdRegistry
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
@@ -11,6 +12,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import com.github.hechtcarmel.jetbrainsindexmcpplugin.util.TreeFormatter
 import com.intellij.openapi.project.Project
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
@@ -32,19 +35,21 @@ class FileStructureTool : AbstractMcpTool() {
 
         Supports: Java, Kotlin, Python, JavaScript, TypeScript, PHP, Markdown
 
-        Returns: The legacy formatted tree string plus structured nodes with element types,
-        modifiers, signatures, source ranges, children, and optional symbolId handles. All nodes
-        are returned; at most 500 handles are allocated per response. symbolIdsTruncated and
-        symbolIdsOmitted report nodes whose optional handle was omitted by this budget.
+        Returns: The legacy formatted tree string. Set includeNodes=true for structured nodes;
+        set includeSymbolIds=true to bind exact handles for those nodes. Nodes and handles are
+        opt-in to keep ordinary outline responses small and avoid registry churn.
 
         Parameters: file (required) - Path relative to project root
 
-        Example: {"file": "src/main/java/com/example/MyClass.java"}
+        Example: {"file": "src/main/java/com/example/MyClass.java", "includeNodes": true}
     """.trimIndent()
 
     override val inputSchema: ToolSchema = SchemaBuilder.tool()
         .projectPath()
         .file(description = "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). REQUIRED.")
+        .booleanProperty(ParamNames.INCLUDE_NODES, "Include structured declaration nodes. Default: false.")
+        .booleanProperty(ParamNames.INCLUDE_SYMBOL_IDS, "Bind exact symbolId handles for returned nodes; implies includeNodes. Default: false.")
+        .intProperty(ParamNames.MAX_SYMBOL_IDS, "Maximum handles to allocate when includeSymbolIds=true (1–100). Default: 100.")
         .build()
 
     override suspend fun doExecute(project: Project, arguments: JsonObject): CallToolResult {
@@ -74,16 +79,37 @@ class FileStructureTool : AbstractMcpTool() {
             } else {
                 TreeFormatter.format(nodes, psiFile.name, psiFile.language.id)
             }
-            val bindingBudget = StructureBindingBudget(SymbolIdRegistry.getInstance().responseHandleBudget)
-            val structuredNodes = bindStructureNodes(project, nodes, bindingBudget)
+            val includeSymbolIds = arguments[ParamNames.INCLUDE_SYMBOL_IDS]
+                ?.jsonPrimitive?.booleanOrNull ?: false
+            val includeNodes = includeSymbolIds || (arguments[ParamNames.INCLUDE_NODES]
+                ?.jsonPrimitive?.booleanOrNull ?: false)
+            val requestedBudget = if (includeSymbolIds) {
+                arguments[ParamNames.MAX_SYMBOL_IDS]
+                    ?.jsonPrimitive?.intOrNull ?: DEFAULT_HANDLE_BUDGET
+            } else {
+                DEFAULT_HANDLE_BUDGET
+            }
+            if (includeSymbolIds && requestedBudget !in 1..MAX_HANDLE_BUDGET) {
+                return@suspendingReadAction createErrorResult(
+                    "maxSymbolIds must be between 1 and $MAX_HANDLE_BUDGET"
+                )
+            }
+            val bindingBudget = StructureBindingBudget(
+                remaining = if (includeSymbolIds) requestedBudget else 0
+            )
+            val structuredNodes = if (includeNodes) {
+                bindStructureNodes(project, nodes, bindingBudget)
+            } else {
+                emptyList()
+            }
 
             createJsonResult(FileStructureResult(
                 file = file,
                 language = psiFile.language.id,
                 structure = treeString,
                 nodes = structuredNodes,
-                symbolIdsTruncated = bindingBudget.omitted > 0,
-                symbolIdsOmitted = bindingBudget.omitted
+                symbolIdsTruncated = includeSymbolIds && bindingBudget.omitted > 0,
+                symbolIdsOmitted = if (includeSymbolIds) bindingBudget.omitted else 0
             ))
         }
     }
@@ -117,3 +143,6 @@ class FileStructureTool : AbstractMcpTool() {
             )
         }
 }
+
+private const val DEFAULT_HANDLE_BUDGET = 100
+private const val MAX_HANDLE_BUDGET = 100

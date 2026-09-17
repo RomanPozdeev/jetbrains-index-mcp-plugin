@@ -11,7 +11,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-/** Run with -PkotlinPluginTests=true. Uses real Kotlin PSI without compile-time Kotlin plugin types. */
+/**
+ * Run with `-PkotlinPluginTests=true`; the default test task intentionally excludes this source set.
+ * Uses real Kotlin PSI without compile-time Kotlin plugin types.
+ */
 class KotlinOutlineKindsBehaviorTest : McpPlatformTestCase() {
     private val json = Json { ignoreUnknownKeys = true }
 

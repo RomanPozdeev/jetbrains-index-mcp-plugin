@@ -787,14 +787,13 @@ description:
   
   Supports: Java, Kotlin, Python, JavaScript, TypeScript, PHP, Markdown
   
-  Returns: The legacy formatted tree string plus structured nodes with element types,
-  modifiers, signatures, source ranges, children, and optional symbolId handles. All nodes
-  are returned; at most 500 handles are allocated per response. symbolIdsTruncated and
-  symbolIdsOmitted report nodes whose optional handle was omitted by this budget.
+  Returns: The legacy formatted tree string. Set includeNodes=true for structured nodes;
+  set includeSymbolIds=true to bind exact handles for those nodes. Nodes and handles are
+  opt-in to keep ordinary outline responses small and avoid registry churn.
   
   Parameters: file (required) - Path relative to project root
   
-  Example: {"file": "src/main/java/com/example/MyClass.java"}
+  Example: {"file": "src/main/java/com/example/MyClass.java", "includeNodes": true}
 schema:
   {
     "properties":
@@ -803,6 +802,21 @@ schema:
       {
         "description": "Path to file relative to project root (e.g., 'src/main/java/com/example/MyClass.java'). REQUIRED.",
         "type": "string"
+      },
+      "includeNodes":
+      {
+        "description": "Include structured declaration nodes. Default: false.",
+        "type": "boolean"
+      },
+      "includeSymbolIds":
+      {
+        "description": "Bind exact symbolId handles for returned nodes; implies includeNodes. Default: false.",
+        "type": "boolean"
+      },
+      "maxSymbolIds":
+      {
+        "description": "Maximum handles to allocate when includeSymbolIds=true (1–100). Default: 100.",
+        "type": "integer"
       },
       "project_path":
       {

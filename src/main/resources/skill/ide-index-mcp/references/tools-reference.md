@@ -333,10 +333,17 @@ Get hierarchical file structure like IDE's Structure panel. Each element include
 |-----------|------|----------|-------------|
 | `file` | string | yes | Relative file path |
 | `project_path` | string | no | Project root path |
+| `includeNodes` | boolean | no | Include structured declaration nodes. Default: false |
+| `includeSymbolIds` | boolean | no | Bind exact handles for nodes; implies `includeNodes`. Default: false |
+| `maxSymbolIds` | integer | no | Handle budget when handles are enabled, from 1–100. Default: 100 |
 
-**Returns**: `{ file, language, structure, nodes: [{name, kind, signature?, modifiers, line, endLine?, children, symbolId?}], symbolIdsTruncated, symbolIdsOmitted }`
-`structure` is retained for compatibility. `nodes` is the same hierarchy as structured data; IDs are bound to the exact extracted PSI elements rather than reconstructed from line numbers. Kotlin node kinds distinguish `INTERFACE`, `CLASS`, `ENUM`, `ANNOTATION`, and `OBJECT`.
-All nodes are retained; handles are limited to the first 500 eligible nodes in preorder. `symbolIdsTruncated` flags this handle budget and `symbolIdsOmitted` counts budget omissions. Query a handle-less node through targeted semantic discovery.
+**Returns**: `{ file, language, structure, nodes?, symbolIdsTruncated?, symbolIdsOmitted? }`
+`structure` is retained for compatibility. Set `includeNodes=true` to receive the same hierarchy as
+structured data; set `includeSymbolIds=true` when exact handles are needed (it implies nodes). IDs
+are bound to the exact extracted PSI elements rather than reconstructed from line numbers. Kotlin
+node kinds distinguish `INTERFACE`, `CLASS`, `ENUM`, `ANNOTATION`, and `OBJECT`.
+Handles are limited to 100 per response by default; `maxSymbolIds` can lower that limit to 1–100.
+`symbolIdsTruncated` flags this per-response budget and `symbolIdsOmitted` counts budget omissions.
 **Languages**: Java, Kotlin, Python, JS/TS, PHP, Markdown.
 
 PHP support requires the PHP plugin and is available in PhpStorm or IntelliJ IDEA Ultimate with the PHP plugin enabled.

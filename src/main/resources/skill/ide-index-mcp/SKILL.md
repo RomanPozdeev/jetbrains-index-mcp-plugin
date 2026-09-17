@@ -103,9 +103,16 @@ When working in a git worktree (e.g., `/project/.claude/worktrees/agent-xyz` or 
 3. **Column must point to the symbol name**, not whitespace or punctuation. For `public void myMethod()`, column should land on `m` of `myMethod`. For dotted expressions like `json.dumps()` or `os.path.join()`, put the column on the member token (`dumps`, `join`) when you want the member definition rather than the module/package.
 4. **project_path is only needed** for multi-project workspaces. Omit for single-project setups. When needed, use the absolute path to the project root.
 5. **Reuse exact targets with `symbolId`**: class, symbol, reference, implementation, and super-method searches return opaque handles for exact declarations. Definition, symbol-info, reference, implementation, and member-edit tools accept a nested `target` containing exactly one of `symbolId`, `position`, or `qualifiedName` + `language`; do not mix it with top-level selectors. A handle routes to its owning project when `project_path` is omitted and restorable source declarations survive edits or rename. Cached pages marked `stale` rebind exact handles when returned. Rediscover after `SYMBOL_ID_EXPIRED`; self-navigating synthetic targets expire after their backing file changes, and handles are non-canonical and must not be compared for symbol equality.
+
 6. **Preview risky refactorings first**: `ide_refactor_rename`, `ide_refactor_safe_delete`, and `ide_change_signature` accept `dryRun: true`. Inspect `canApply`, `plannedChange`, `affectedFiles`, usage/conflict counts, and `warnings`. Preview does not write or save files and creates no undo entry. Apply with a second call only after reviewing the result.
 7. **Use built-in search scope intentionally**: `ide_find_references`, `ide_find_implementations`, `ide_type_hierarchy`, `ide_call_hierarchy`, `ide_find_class`, `ide_find_file`, and `ide_find_symbol` accept `scope`. Use `project_files` for the default project-only view, `project_and_libraries` when dependency code matters, `project_production_files` to stay out of tests, and `project_test_files` when you want test-only results.
 8. **Narrow by directory with `paths`**: `ide_search_text`, `ide_find_references`, and `ide_structural_search_replace` accept `paths`, an array of project-relative globs where a leading `!` excludes — e.g. `{"paths": ["src/main/kotlin/**/handlers/**", "!**/*Test.kt"]}`. Prefer one scoped call over a project-wide search you filter yourself: filtering client-side pays tokens for every discarded hit, and with pagination a whole page can be filtered away and look like an empty result. Composes with `scope` and `filePattern`.
+
+`ide_file_structure` keeps the legacy `structure` response by default and avoids returning a
+structured-node payload or allocating handles. Use `includeNodes=true` for structured declarations,
+and `includeSymbolIds=true` when exact handles are needed (it implies `includeNodes`). Handle
+allocation is opt-in and capped at 100 per response; lower it with `maxSymbolIds` (1–100). Large
+responses report `symbolIdsTruncated` and `symbolIdsOmitted`.
 
 ## Tool Selection by Task
 
@@ -204,59 +211,3 @@ Explicit pagination returns bounded breadth-first pages with traversal-local `no
 A continuation budget limit preserves the computed page and reports `truncationReason`;
 narrow the query when `hasMore=true` has no cursor. Cancellation and indexing transitions
 propagate through reflective handlers instead of completing an empty hierarchy.
-### Symbol handles for definition and symbol info
-
-`ide_find_definition` and `ide_symbol_info` return `symbolId`. Pass it alone instead of
-coordinates or `language` + `symbol` to resolve the same declaration after edits or rename.
-When `project_path` is omitted, the handle identifies its owning open project. Handles expire
-on server restart, project close, deletion, one hour of inactivity, or eviction from the
-4,096-entry cache. `SYMBOL_ID_EXPIRED` requires rediscovery. Handles are non-canonical:
-different IDs can identify the same declaration, so do not compare IDs for symbol equality.
-
-### Structured lookup targets
-
-`ide_find_definition` and `ide_symbol_info` also accept a nested `target` with exactly one
-variant: `{ "symbolId": "sym_..." }`, `{ "position": { "file": "src/Foo.java", "line": 3,
-"column": 8 } }`, or `{ "qualifiedName": "com.example.Foo#bar", "language": "Java" }`.
-Do not mix `target` with top-level selectors. Existing top-level requests remain valid.
-Validation runs before PSI synchronization, and `target.symbolId` routes to its owning project.
-
-### Rename preview
-
-`ide_refactor_rename` accepts `dryRun: true` with legacy selectors, `symbolId`, or a nested
-`target`. It returns `canApply`, `target`, `plannedChange`, `affectedFiles`, `usageCount`,
-`conflictCount`, `warnings` and `elapsedMs` without writing source or saving documents.
-Preview and apply share conflict discovery and automatic rename selections. A successful
-apply returns current `updatedSymbol` metadata. The preview response assembly is shared
-with subsequent refactoring preview implementations.
-
-### Safe-delete preview
-
-`ide_refactor_safe_delete` accepts `dryRun: true` and uses the same preview response as rename.
-It accepts legacy selectors, `symbolId`, or a nested `target`. Preview and apply share forced-delete
-eligibility, including files with no declarations and incomplete usage discovery; warnings describe
-these limits. Successful symbol deletion returns `invalidatedSymbolId`. Java method parameters
-ignore non-code word matches; lambda, catch and loop bindings return structured refusal when used.
-
-### Change-signature preview
-
-`ide_change_signature` accepts `symbolId`, a nested `target`, or the existing file position.
-`dryRun=true` uses public platform usage and conflict discovery without running the processor.
-The shared preview reports affected files, conflicts, read-only scope, and cases requiring
-an interactive overrider/default-value decision. Apply returns updated symbol metadata.
-
-### Symbol handles in search and member editing
-
-Class, symbol, reference, implementation, and super-method queries expose exact declaration handles.
-Reference and implementation queries and member edits accept the shared target selectors.
-Cached searches keep `stale=true` after PSI edits and rebind exact smart pointers on returned pages;
-deleted targets and another project/session are rejected. Member edits return updated metadata.
-Kotlin abstract/sealed declarations retain `ABSTRACT_CLASS`; anonymous implementations have
-a useful source location without an invented qualified name.
-
-### Structured file outlines
-
-`ide_file_structure` keeps the formatted `structure` string and adds `nodes` with nested
-declarations, source ranges, signatures, modifiers, and optional exact `symbolId` handles.
-Large outlines retain all nodes and explicitly report `symbolIdsTruncated` and
-`symbolIdsOmitted` when their handle budget is exhausted.
